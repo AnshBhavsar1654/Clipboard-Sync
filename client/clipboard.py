@@ -3,20 +3,25 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import ctypes
+import io
 import logging
+from pathlib import Path
 import threading
+import time
 from collections.abc import Awaitable, Callable
 from ctypes import wintypes
 from typing import Any
 
+from PIL import Image, ImageGrab
 import win32clipboard
 import win32con
 import win32gui
 
 logger = logging.getLogger(__name__)
 
-ClipboardChangeHandler = Callable[[str], Awaitable[None] | None]
+ClipboardChangeHandler = Callable[[str | dict[str, Any]], Awaitable[None] | None]
 
 _WINDOW_CLASS = "ClipBoardSyncHiddenListener"
 WM_CLIPBOARDUPDATE = 0x031D
@@ -103,6 +108,89 @@ class ClipboardMonitor:
             win32clipboard.CloseClipboard()
 
         logger.debug("Local clipboard updated programmatically (%d chars)", len(text))
+
+    def set_image_from_base64(self, b64_data_uri: str) -> None:
+        """Write base64-encoded image data to Win32 clipboard in CF_DIB format."""
+        try:
+            if "," in b64_data_uri:
+                b64_str = b64_data_uri.split(",", 1)[1]
+            else:
+                b64_str = b64_data_uri
+
+            raw_bytes = base64.b64decode(b64_str)
+            img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
+
+            buf = io.BytesIO()
+            img.save(buf, "BMP")
+            bmp_bytes = buf.getvalue()
+            dib_bytes = bmp_bytes[14:]  # Omit 14-byte BMP header to get DIB
+
+            with self._state_lock:
+                self._suppress_next_change = True
+                self._last_content = b64_data_uri[:100]
+
+            win32clipboard.OpenClipboard()
+            try:
+                win32clipboard.EmptyClipboard()
+                win32clipboard.SetClipboardData(win32con.CF_DIB, dib_bytes)
+            finally:
+                win32clipboard.CloseClipboard()
+
+            logger.info("Set image (%d bytes DIB) to Windows clipboard programmatically", len(dib_bytes))
+        except Exception as exc:
+            logger.warning("Failed to write image to Windows clipboard: %s", exc)
+
+    @staticmethod
+    def get_clipboard_payload() -> dict[str, Any] | None:
+        """Inspect system clipboard for text, images, or file drop lists."""
+        # 1. Try reading Image or File list from clipboard using PIL ImageGrab
+        try:
+            grabbed = ImageGrab.grabclipboard()
+            if isinstance(grabbed, Image.Image):
+                buf = io.BytesIO()
+                grabbed.save(buf, format="PNG")
+                png_bytes = buf.getvalue()
+                b64_str = base64.b64encode(png_bytes).decode("utf-8")
+                return {
+                    "type": "image",
+                    "content": f"data:image/png;base64,{b64_str}",
+                    "filename": f"screenshot_{int(time.time())}.png",
+                    "filesize": len(png_bytes),
+                }
+            elif isinstance(grabbed, list) and grabbed:
+                first_file = Path(grabbed[0])
+                if first_file.is_file():
+                    ext = first_file.suffix.lower()
+                    filesize = first_file.stat().st_size
+                    if ext in (".png", ".jpg", ".jpeg", ".gif", ".webp") and filesize < 10 * 1024 * 1024:
+                        raw = first_file.read_bytes()
+                        mime = f"image/{ext[1:]}" if ext != ".jpg" else "image/jpeg"
+                        b64_str = base64.b64encode(raw).decode("utf-8")
+                        return {
+                            "type": "image",
+                            "content": f"data:{mime};base64,{b64_str}",
+                            "filename": first_file.name,
+                            "filesize": filesize,
+                        }
+                    else:
+                        return {
+                            "type": "file",
+                            "content": f"File: {first_file.name}",
+                            "filename": first_file.name,
+                            "filesize": filesize,
+                            "filepath": str(first_file.resolve()),
+                        }
+        except Exception as exc:
+            logger.debug("ImageGrab inspect exception: %s", exc)
+
+        # 2. Fallback to Unicode text reading
+        text = ClipboardMonitor.get_text()
+        if text and text.strip():
+            return {
+                "type": "text",
+                "content": text,
+            }
+        return None
 
     @staticmethod
     def get_text() -> str | None:
@@ -216,24 +304,26 @@ class ClipboardMonitor:
                 logger.debug("Ignored programmatic clipboard update")
                 return
 
-        text = self.get_text()
-        if text is None:
-            logger.debug("Clipboard changed but contains no text")
+        payload = self.get_clipboard_payload()
+        if payload is None:
+            logger.debug("Clipboard changed but contains unsupported content")
             return
 
+        content_key = str(payload.get("content", ""))[:100]
         with self._state_lock:
-            if text == self._last_content:
+            if content_key == self._last_content:
                 logger.debug("Ignored duplicate clipboard content")
                 return
-            self._last_content = text
+            self._last_content = content_key
 
-        logger.info("Clipboard change detected (%d chars)", len(text))
-        print(f"[CLIPBOARD] {text!r}")
+        p_type = payload.get("type", "text")
+        logger.info("Clipboard change detected (type=%s)", p_type)
+        print(f"[CLIPBOARD] Captured {p_type} update")
 
-        self._dispatch_change(text)
+        self._dispatch_change(payload)
 
-    def _dispatch_change(self, text: str) -> None:
+    def _dispatch_change(self, payload: str | dict[str, Any]) -> None:
         """Schedule the async change handler on the main event loop."""
-        result = self._on_change(text)
+        result = self._on_change(payload)
         if asyncio.iscoroutine(result):
             asyncio.run_coroutine_threadsafe(result, self._loop)

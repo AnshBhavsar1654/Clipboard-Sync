@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import datetime
+import io
 import logging
 import queue
 import socket
@@ -12,9 +14,12 @@ import threading
 import time
 import webbrowser
 from pathlib import Path
+from tkinter import filedialog
 from typing import Any
 
 import customtkinter as ctk
+import win32clipboard
+import win32con
 from PIL import Image
 import qrcode
 import uvicorn
@@ -397,7 +402,33 @@ class ClipBoardSyncGUI(ctk.CTk):
             hover_color="#00897B",
             command=lambda: webbrowser.open(self.mobile_url)
         )
-        btn_open_browser.grid(row=3, column=0, padx=28, pady=(0, 24), sticky="w")
+        btn_open_browser.grid(row=3, column=0, padx=28, pady=(0, 16), sticky="w")
+
+        # Action toolbar for sending images or files from desktop
+        btn_box = ctk.CTkFrame(details_card, fg_color="transparent")
+        btn_box.grid(row=4, column=0, padx=28, pady=(0, 16), sticky="w")
+
+        btn_send_img = ctk.CTkButton(
+            btn_box,
+            text="📷 Send Image",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            height=34,
+            fg_color="#7B1FA2",
+            hover_color="#6A1B9A",
+            command=self.send_image_file
+        )
+        btn_send_img.grid(row=0, column=0, padx=(0, 12))
+
+        btn_send_file = ctk.CTkButton(
+            btn_box,
+            text="📁 Send File",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            height=34,
+            fg_color="#1565C0",
+            hover_color="#0D47A1",
+            command=self.send_any_file
+        )
+        btn_send_file.grid(row=0, column=1)
 
         # Live connected peer indicator
         self.conn_count_label = ctk.CTkLabel(
@@ -407,7 +438,7 @@ class ClipBoardSyncGUI(ctk.CTk):
             text_color="#A5D6A7",
             anchor="w"
         )
-        self.conn_count_label.grid(row=4, column=0, padx=28, pady=(12, 28), sticky="w")
+        self.conn_count_label.grid(row=5, column=0, padx=28, pady=(12, 24), sticky="w")
 
         return frame
 
@@ -527,7 +558,7 @@ class ClipBoardSyncGUI(ctk.CTk):
         if not items:
             self.history_empty_label = ctk.CTkLabel(
                 self.history_scroll,
-                text="No clipboard items synchronized yet.\nCopy some text on any connected device to see it appear here instantly!",
+                text="No clipboard items synchronized yet.\nCopy text, screenshots, or files on any connected device!",
                 font=ctk.CTkFont(size=15),
                 text_color="#7B7E98"
             )
@@ -544,25 +575,179 @@ class ClipBoardSyncGUI(ctk.CTk):
             if t_str and "T" in t_str:
                 t_str = t_str.split("T")[1][:8]
 
-            title_str = f"📱 From: {dev_id}  |  ⏰ {t_str}"
+            item_type = item.get("type", "text")
+            type_icon = "📷 Image" if item_type == "image" else ("📁 File" if item_type == "file" else "📝 Text")
+            title_str = f" From: {dev_id}  |  [{type_icon}]  |  ⏰ {t_str}"
             top_lbl = ctk.CTkLabel(card, text=title_str, font=ctk.CTkFont(size=12, weight="bold"), text_color="#00E5FF", anchor="w")
             top_lbl.grid(row=0, column=0, padx=16, pady=(12, 4), sticky="w")
 
             content_text = str(item.get("content", ""))
-            preview = content_text if len(content_text) <= 150 else content_text[:150] + "..."
-            txt_lbl = ctk.CTkLabel(card, text=preview, font=ctk.CTkFont(size=14), text_color="#EEEEEE", justify="left", anchor="w", wraplength=560)
-            txt_lbl.grid(row=1, column=0, padx=16, pady=(0, 12), sticky="w")
+            file_url = item.get("file_url")
 
-            btn_copy = ctk.CTkButton(
-                card,
-                text="📋 Copy to Desktop",
-                width=130,
-                height=32,
-                fg_color="#00897B",
-                hover_color="#00695C",
-                command=lambda c=content_text: self.copy_clip_to_local(c)
+            if item_type == "image":
+                # Render Image thumbnail if base64 URI
+                try:
+                    if content_text.startswith("data:image/"):
+                        b64_part = content_text.split(",", 1)[1]
+                        raw_img = base64.b64decode(b64_part)
+                        pil_img = Image.open(io.BytesIO(raw_img))
+                        pil_img.thumbnail((200, 130))
+                        ctk_thumb = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=pil_img.size)
+                        img_lbl = ctk.CTkLabel(card, image=ctk_thumb, text="")
+                        img_lbl.grid(row=1, column=0, padx=16, pady=(4, 12), sticky="w")
+                    elif file_url:
+                        lbl_file = ctk.CTkLabel(card, text=f"📷 Image File: {item.get('filename', 'Image')}", font=ctk.CTkFont(size=14, weight="bold"), text_color="#EEEEEE")
+                        lbl_file.grid(row=1, column=0, padx=16, pady=(4, 12), sticky="w")
+                except Exception:
+                    lbl_file = ctk.CTkLabel(card, text="📷 [Image Data]", font=ctk.CTkFont(size=14), text_color="#EEEEEE")
+                    lbl_file.grid(row=1, column=0, padx=16, pady=(4, 12), sticky="w")
+
+                btn_copy = ctk.CTkButton(
+                    card,
+                    text="📋 Copy Image",
+                    width=130,
+                    height=32,
+                    fg_color="#7B1FA2",
+                    hover_color="#6A1B9A",
+                    command=lambda c=content_text: self.copy_image_to_local(c)
+                )
+                btn_copy.grid(row=0, column=1, rowspan=2, padx=16, pady=12)
+
+            elif item_type == "file":
+                fname = item.get("filename", "File")
+                fsize = item.get("filesize", 0)
+                fsize_str = f"{fsize / 1024:.1f} KB" if fsize < 1024 * 1024 else f"{fsize / (1024*1024):.1f} MB"
+                file_info = f"📁 {fname} ({fsize_str})"
+
+                lbl_file = ctk.CTkLabel(card, text=file_info, font=ctk.CTkFont(size=14, weight="bold"), text_color="#81D4FA", anchor="w")
+                lbl_file.grid(row=1, column=0, padx=16, pady=(4, 12), sticky="w")
+
+                if file_url:
+                    full_file_url = f"{self.mobile_url}{file_url}" if not file_url.startswith("http") else file_url
+                    btn_open = ctk.CTkButton(
+                        card,
+                        text="🌐 Download File",
+                        width=130,
+                        height=32,
+                        fg_color="#1565C0",
+                        hover_color="#0D47A1",
+                        command=lambda u=full_file_url: webbrowser.open(u)
+                    )
+                    btn_open.grid(row=0, column=1, rowspan=2, padx=16, pady=12)
+
+            else:
+                preview = content_text if len(content_text) <= 150 else content_text[:150] + "..."
+                txt_lbl = ctk.CTkLabel(card, text=preview, font=ctk.CTkFont(size=14), text_color="#EEEEEE", justify="left", anchor="w", wraplength=560)
+                txt_lbl.grid(row=1, column=0, padx=16, pady=(0, 12), sticky="w")
+
+                btn_copy = ctk.CTkButton(
+                    card,
+                    text="📋 Copy Text",
+                    width=130,
+                    height=32,
+                    fg_color="#00897B",
+                    hover_color="#00695C",
+                    command=lambda c=content_text: self.copy_clip_to_local(c)
+                )
+                btn_copy.grid(row=0, column=1, rowspan=2, padx=16, pady=12)
+
+    def send_image_file(self) -> None:
+        """Pick an image file from disk and broadcast across local Wi-Fi bridge."""
+        filepath = filedialog.askopenfilename(
+            title="Select Image to Send",
+            filetypes=[("Images", "*.png;*.jpg;*.jpeg;*.gif;*.webp"), ("All Files", "*.*")]
+        )
+        if not filepath:
+            return
+        try:
+            path = Path(filepath)
+            raw = path.read_bytes()
+            ext = path.suffix.lower().replace(".", "")
+            if ext == "jpg":
+                ext = "jpeg"
+            b64_str = base64.b64encode(raw).decode("utf-8")
+            data_uri = f"data:image/{ext};base64,{b64_str}"
+
+            # Write to local Windows clipboard
+            self.copy_image_to_local(data_uri)
+
+            # Broadcast via sync_hub
+            from server.models import ClipboardItem, get_utc_now_iso
+            item = ClipboardItem(
+                device_id="Desktop-GUI",
+                timestamp=get_utc_now_iso(),
+                type="image",
+                content=data_uri,
+                filename=path.name,
+                filesize=len(raw)
             )
-            btn_copy.grid(row=0, column=1, rowspan=2, padx=16, pady=12)
+            if self.engine._loop and self.engine._loop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    sync_hub.handle_message(None, item.to_message_dict()),
+                    self.engine._loop
+                )
+            self.log_queue.put(f"[ACTION] Sent image '{path.name}' ({len(raw)} bytes) across LAN bridge.")
+            self._refresh_history_view()
+        except Exception as exc:
+            self.log_queue.put(f"[ERROR] Failed to send image file: {exc}")
+
+    def send_any_file(self) -> None:
+        """Pick any file from disk, upload to server, and broadcast across local Wi-Fi bridge."""
+        filepath = filedialog.askopenfilename(title="Select File to Send")
+        if not filepath:
+            return
+        try:
+            path = Path(filepath)
+            import shutil
+            import uuid
+            from server.main import UPLOADS_DIR
+            safe_name = f"{uuid.uuid4().hex[:10]}{path.suffix}"
+            dest = UPLOADS_DIR / safe_name
+            shutil.copy2(path, dest)
+
+            file_url = f"/uploads/{safe_name}"
+            from server.models import ClipboardItem, get_utc_now_iso
+            item = ClipboardItem(
+                device_id="Desktop-GUI",
+                timestamp=get_utc_now_iso(),
+                type="file",
+                content=f"File: {path.name}",
+                filename=path.name,
+                filesize=path.stat().st_size,
+                file_url=file_url
+            )
+            if self.engine._loop and self.engine._loop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    sync_hub.handle_message(None, item.to_message_dict()),
+                    self.engine._loop
+                )
+            self.log_queue.put(f"[ACTION] Sent file '{path.name}' ({path.stat().st_size} bytes) across LAN bridge.")
+            self._refresh_history_view()
+        except Exception as exc:
+            self.log_queue.put(f"[ERROR] Failed to send file: {exc}")
+
+    def copy_image_to_local(self, data_uri: str) -> None:
+        """Write base64 image data to Windows clipboard."""
+        try:
+            if "," in data_uri:
+                b64_str = data_uri.split(",", 1)[1]
+            else:
+                b64_str = data_uri
+            raw = base64.b64decode(b64_str)
+            img = Image.open(io.BytesIO(raw)).convert("RGB")
+            buf = io.BytesIO()
+            img.save(buf, "BMP")
+            dib_bytes = buf.getvalue()[14:]
+
+            win32clipboard.OpenClipboard()
+            try:
+                win32clipboard.EmptyClipboard()
+                win32clipboard.SetClipboardData(win32con.CF_DIB, dib_bytes)
+            finally:
+                win32clipboard.CloseClipboard()
+            self.log_queue.put("[ACTION] Image copied directly to Windows clipboard (ready for Ctrl+V).")
+        except Exception as exc:
+            self.log_queue.put(f"[ERROR] Failed to set image to Windows clipboard: {exc}")
 
     def copy_clip_to_local(self, text: str) -> None:
         self.clipboard_clear()

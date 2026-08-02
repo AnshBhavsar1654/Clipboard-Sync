@@ -19,18 +19,28 @@ class ClipboardItem(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     device_id: str
     timestamp: str = Field(default_factory=get_utc_now_iso)
-    type: str = "text"
-    content: str
+    type: str = "text"  # "text", "image", "file"
+    content: str = ""
+    filename: str | None = None
+    filesize: int | None = None
+    file_url: str | None = None
 
     def to_message_dict(self) -> dict[str, Any]:
         """Convert to standard broadcast dictionary payload."""
-        return {
+        data = {
             "id": self.id,
             "device_id": self.device_id,
             "timestamp": self.timestamp,
             "type": self.type,
             "content": self.content,
         }
+        if self.filename is not None:
+            data["filename"] = self.filename
+        if self.filesize is not None:
+            data["filesize"] = self.filesize
+        if self.file_url is not None:
+            data["file_url"] = self.file_url
+        return data
 
 
 class HistoryMessage(BaseModel):

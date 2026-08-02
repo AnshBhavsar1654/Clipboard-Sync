@@ -8,7 +8,7 @@ from pathlib import Path
 import sys
 from typing import Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -39,11 +39,40 @@ else:
     STATIC_DIR = Path(__file__).parent / "static"
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
+UPLOADS_DIR = STATIC_DIR / "uploads"
+UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
 
 @app.get("/api/history")
 async def get_recent_history() -> dict[str, Any]:
     """REST endpoint to inspect active server clipboard history."""
     return {"items": hub.get_history(), "connection_count": hub.connection_count}
+
+
+@app.post("/api/upload")
+async def upload_file_endpoint(file: UploadFile = File(...)) -> dict[str, Any]:
+    """REST endpoint to upload files and images for cross-device sharing."""
+    import uuid
+    original_name = file.filename or "file"
+    ext = Path(original_name).suffix
+    safe_name = f"{uuid.uuid4().hex[:10]}{ext}"
+    dest_path = UPLOADS_DIR / safe_name
+
+    contents = await file.read()
+    dest_path.write_bytes(contents)
+
+    mime = file.content_type or ""
+    item_type = "image" if mime.startswith("image/") or ext.lower() in (".png", ".jpg", ".jpeg", ".gif", ".webp") else "file"
+    relative_url = f"/uploads/{safe_name}"
+
+    logger.info("Uploaded %s (%d bytes) saved as %s", item_type, len(contents), safe_name)
+
+    return {
+        "url": relative_url,
+        "filename": original_name,
+        "filesize": len(contents),
+        "type": item_type,
+    }
 
 
 @app.websocket("/ws")

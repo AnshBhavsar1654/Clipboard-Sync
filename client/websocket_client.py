@@ -90,19 +90,30 @@ class WebSocketClient:
         self._sender_task = None
         logger.info("WebSocket client stopped")
 
-    async def send_clipboard_update(self, content: str, content_type: str = "text") -> None:
+    async def send_clipboard_update(
+        self,
+        content: str,
+        content_type: str = "text",
+        filename: str | None = None,
+        filesize: int | None = None,
+        file_url: str | None = None,
+    ) -> None:
         """Queue a clipboard update for transmission to the backend."""
-        message = self._build_message(content, content_type)
-        await self._send_queue.put(message)
-        logger.debug("Queued clipboard update for send")
-
-    def _build_message(self, content: str, content_type: str) -> dict[str, Any]:
-        return {
+        message = {
             "device_id": self._device_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "type": content_type,
             "content": content,
         }
+        if filename:
+            message["filename"] = filename
+        if filesize is not None:
+            message["filesize"] = filesize
+        if file_url:
+            message["file_url"] = file_url
+
+        await self._send_queue.put(message)
+        logger.debug("Queued %s update for send", content_type)
 
     async def _connection_loop(self) -> None:
         """Connect, receive messages, and reconnect on failure."""
