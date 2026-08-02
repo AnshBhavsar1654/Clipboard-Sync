@@ -74,6 +74,7 @@ async def async_run_all(port: int = 8000) -> None:
         port=port,
         log_level="warning",
         access_log=False,
+        log_config=None,
     )
     server = uvicorn.Server(uv_config)
     server_task = asyncio.create_task(server.serve(), name="uvicorn-backend")
