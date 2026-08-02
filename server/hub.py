@@ -63,11 +63,11 @@ class SyncHub:
     async def handle_message(self, sender: WebSocket, message: dict[str, Any]) -> None:
         """Process an incoming clipboard event and broadcast to other connected peers."""
         content_type = message.get("type", "text")
-        content = message.get("content")
+        content = message.get("content", "")
         device_id = message.get("device_id", "unknown")
 
-        if content_type != "text" or not isinstance(content, str):
-            logger.warning("Received invalid or unsupported message format: %s", message)
+        if content_type not in ("text", "image", "file"):
+            logger.warning("Received unsupported message format: %s", message)
             return
 
         item = ClipboardItem(
@@ -75,11 +75,14 @@ class SyncHub:
             timestamp=message.get("timestamp") or get_utc_now_iso(),
             type=content_type,
             content=content,
+            filename=message.get("filename"),
+            filesize=message.get("filesize"),
+            file_url=message.get("file_url"),
         )
 
         async with self._lock:
             # Prevent repetitive consecutive duplicates in history feed
-            if not self._history or self._history[-1].content != item.content:
+            if not self._history or self._history[-1].content != item.content or self._history[-1].file_url != item.file_url:
                 self._history.append(item)
                 if len(self._history) > self.max_history:
                     self._history.pop(0)
@@ -87,7 +90,7 @@ class SyncHub:
             peers = [ws for ws in self._connections if ws != sender]
 
         payload = item.to_message_dict()
-        logger.info("Broadcasting clipboard clip (%d chars) from device '%s' to %d peers", len(content), device_id, len(peers))
+        logger.info("Broadcasting clipboard clip (%s) from device '%s' to %d peers", content_type, device_id, len(peers))
 
         for ws in peers:
             try:

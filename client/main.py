@@ -61,9 +61,51 @@ class ClipBoardSyncApp:
         """Request a graceful shutdown from any thread."""
         self._loop.call_soon_threadsafe(self._shutdown_event.set)
 
-    async def _on_local_clipboard_change(self, text: str) -> None:
+    async def _on_local_clipboard_change(self, payload: str | dict[str, Any]) -> None:
         """Handle a user-initiated clipboard copy detected locally."""
-        await self._websocket.send_clipboard_update(text)
+        if isinstance(payload, str):
+            await self._websocket.send_clipboard_update(content=payload, content_type="text")
+            return
+
+        if not isinstance(payload, dict):
+            return
+
+        p_type = payload.get("type", "text")
+        content = payload.get("content", "")
+        filename = payload.get("filename")
+        filesize = payload.get("filesize")
+        filepath = payload.get("filepath")
+
+        if p_type == "file" and filepath:
+            # Upload file to server REST endpoint
+            try:
+                import httpx
+                http_url = self._config.websocket_url.replace("ws://", "http://").replace("wss://", "https://").replace("/ws", "")
+                upload_endpoint = f"{http_url}/api/upload"
+                async with httpx.AsyncClient() as client:
+                    with open(filepath, "rb") as f:
+                        resp = await client.post(upload_endpoint, files={"file": (filename or "file", f)})
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            await self._websocket.send_clipboard_update(
+                                content=f"File: {data.get('filename')}",
+                                content_type="file",
+                                filename=data.get("filename"),
+                                filesize=data.get("filesize"),
+                                file_url=data.get("url"),
+                            )
+                            logger.info("Uploaded and sent file clip: %s", data.get("filename"))
+                            return
+            except Exception as exc:
+                logger.warning("Failed to upload local file clip: %s", exc)
+
+        await self._websocket.send_clipboard_update(
+            content=content,
+            content_type=p_type,
+            filename=filename,
+            filesize=filesize,
+            file_url=payload.get("file_url"),
+        )
 
     async def _on_remote_clipboard_update(self, message: dict[str, Any]) -> None:
         """Apply a clipboard update or history received from another device."""
@@ -86,26 +128,29 @@ class ClipBoardSyncApp:
             if latest_device == self._config.device_id:
                 logger.debug("Latest history item originated from self; skipping")
                 return
-            content = latest.get("content")
-            if latest.get("type", "text") == "text" and isinstance(content, str):
-                logger.info("Synchronizing latest clipboard history item from device %s", latest_device)
-                print(f"[HISTORY SYNC] From {latest_device}: {content!r}")
-                self._clipboard.set_text(content)
-            return
 
-        if content_type != "text":
-            logger.debug("Ignoring unsupported clipboard type: %s", content_type)
+            c_type = latest.get("type", "text")
+            content = latest.get("content")
+            if c_type == "text" and isinstance(content, str):
+                logger.info("Synchronizing latest clipboard text history item from device %s", latest_device)
+                self._clipboard.set_text(content)
+            elif c_type == "image" and isinstance(content, str) and content.startswith("data:image/"):
+                logger.info("Synchronizing latest clipboard image history item from device %s", latest_device)
+                self._clipboard.set_image_from_base64(content)
             return
 
         content = message.get("content")
-        if not isinstance(content, str):
-            logger.warning("Ignoring remote message with invalid content")
+        if content_type == "image" and isinstance(content, str) and content.startswith("data:image/"):
+            logger.info("Applying remote clipboard image update from device %s", source_device)
+            print(f"[REMOTE IMAGE] From {source_device}")
+            self._clipboard.set_image_from_base64(content)
             return
 
-        logger.info("Applying remote clipboard update from device %s", source_device)
-        print(f"[REMOTE] From {source_device}: {content!r}")
-
-        self._clipboard.set_text(content)
+        if content_type == "text" and isinstance(content, str):
+            logger.info("Applying remote clipboard text update from device %s", source_device)
+            print(f"[REMOTE TEXT] From {source_device}: {content!r}")
+            self._clipboard.set_text(content)
+            return
 
 
 def _install_signal_handlers(app: ClipBoardSyncApp) -> None:

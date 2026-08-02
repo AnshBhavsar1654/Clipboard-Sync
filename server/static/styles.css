@@ -569,3 +569,64 @@ textarea:focus-visible,
     animation: none !important;
   }
 }
+
+/* Image & File Sync Cards */
+.card-media-wrap {
+  width: 100%;
+  margin-bottom: 12px;
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+  background: var(--surface-low);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.card-image-preview {
+  max-width: 100%;
+  max-height: 280px;
+  object-fit: contain;
+  border-radius: var(--radius-sm);
+  display: block;
+}
+
+.file-card-box {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  margin-bottom: 12px;
+}
+
+.file-icon-badge {
+  font-size: 1.6rem;
+  line-height: 1;
+}
+
+.file-details {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow: hidden;
+}
+
+.file-name-title {
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-size-subtitle {
+  font-size: 0.8rem;
+  color: var(--ink-faint);
+}
+
+.link-btn {
+  text-decoration: none;
+}

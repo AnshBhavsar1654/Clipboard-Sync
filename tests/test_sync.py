@@ -91,3 +91,15 @@ def test_consecutive_deduplication() -> None:
     data = response.json()
     assert len(data["items"]) == 1
     assert data["items"][0]["content"] == "Duplicate Clip"
+
+
+def test_file_upload_endpoint() -> None:
+    client = TestClient(app)
+    files = {"file": ("test_doc.txt", b"Sample file content for cross device sync", "text/plain")}
+    response = client.post("/api/upload", files=files)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["filename"] == "test_doc.txt"
+    assert data["type"] == "file"
+    assert "url" in data
+

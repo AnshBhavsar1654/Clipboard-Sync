@@ -10,6 +10,10 @@ document.addEventListener("DOMContentLoaded", () => {
     const sendInput = document.getElementById("send-input");
     const sendBtn = document.getElementById("send-btn");
     const pasteAndSendBtn = document.getElementById("paste-and-send-btn");
+    const uploadImgBtn = document.getElementById("upload-img-btn");
+    const uploadFileBtn = document.getElementById("upload-file-btn");
+    const fileInput = document.getElementById("file-input");
+    const imageInput = document.getElementById("image-input");
     const clearBtn = document.getElementById("clear-btn");
     const clearFeedBtn = document.getElementById("clear-feed-btn");
     const clipboardList = document.getElementById("clipboard-list");
@@ -108,14 +112,61 @@ document.addEventListener("DOMContentLoaded", () => {
             const sorted = msg.items.slice().reverse();
             sorted.forEach(item => renderClipCard(item, true));
             updateEmptyState();
-        } else if (msg.type === "text" && msg.content) {
+        } else if ((msg.type === "text" || msg.type === "image" || msg.type === "file") && (msg.content || msg.file_url)) {
             // Real-time incoming clip
             renderClipCard(msg, false);
             updateEmptyState();
             
             if (msg.device_id !== deviceId) {
-                showToast(`New Clip from ${formatDeviceName(msg.device_id)}`, "info");
+                const label = msg.type === "image" ? "New Image" : (msg.type === "file" ? "New File" : "New Clip");
+                showToast(`${label} from ${formatDeviceName(msg.device_id)}`, "info");
             }
+        }
+    }
+
+    async function uploadAndTransmitFile(file) {
+        if (!file) return;
+
+        showToast(`Uploading ${file.name}...`, "info");
+
+        try {
+            const formData = new FormData();
+            formData.append("file", file);
+
+            const response = await fetch("/api/upload", {
+                method: "POST",
+                body: formData
+            });
+
+            if (!response.ok) {
+                throw new Error(`Upload failed with status ${response.status}`);
+            }
+
+            const data = await response.json();
+            const itemType = data.type || "file";
+
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                showToast("Uploaded, but bridge is offline!", "info");
+                return;
+            }
+
+            const payload = {
+                device_id: deviceId,
+                timestamp: new Date().toISOString(),
+                type: itemType,
+                content: itemType === "image" ? data.url : `File: ${data.filename}`,
+                filename: data.filename,
+                filesize: data.filesize,
+                file_url: data.url
+            };
+
+            ws.send(JSON.stringify(payload));
+            renderClipCard(payload, false);
+            updateEmptyState();
+            showToast(`Transmitted ${data.filename} to Computer!`, "success");
+        } catch (err) {
+            console.error("Upload failed:", err);
+            showToast("Failed to upload file to computer", "info");
         }
     }
 
@@ -157,6 +208,63 @@ document.addEventListener("DOMContentLoaded", () => {
         const deviceName = formatDeviceName(item.device_id);
         
         const timeFormatted = formatTime(item.timestamp);
+        const itemType = item.type || "text";
+
+        let bodyHtml = "";
+        let actionBtnHtml = "";
+
+        if (itemType === "image") {
+            const imgSrc = item.content && item.content.startsWith("data:image/") ? item.content : (item.file_url || item.content);
+            bodyHtml = `
+                <div class="card-media-wrap">
+                    <img src="${imgSrc}" class="card-image-preview" alt="Synced Screenshot" />
+                </div>
+            `;
+            actionBtnHtml = `
+                <a href="${imgSrc}" download="${item.filename || 'synced_image.png'}" class="copy-btn link-btn" target="_blank">
+                    <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                        <polyline points="7 10 12 15 17 10"></polyline>
+                        <line x1="12" y1="15" x2="12" y2="3"></line>
+                    </svg>
+                    <span>Download Image</span>
+                </a>
+            `;
+        } else if (itemType === "file") {
+            const fname = item.filename || "File";
+            const fsize = item.filesize ? (item.filesize < 1024*1024 ? `${(item.filesize/1024).toFixed(1)} KB` : `${(item.filesize/(1024*1024)).toFixed(1)} MB`) : "";
+            const fileHref = item.file_url || "#";
+            bodyHtml = `
+                <div class="file-card-box">
+                    <div class="file-icon-badge">📁</div>
+                    <div class="file-details">
+                        <span class="file-name-title">${escapeHtml(fname)}</span>
+                        <span class="file-size-subtitle">${fsize}</span>
+                    </div>
+                </div>
+            `;
+            actionBtnHtml = `
+                <a href="${fileHref}" download="${escapeHtml(fname)}" class="copy-btn link-btn" target="_blank">
+                    <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                        <polyline points="7 10 12 15 17 10"></polyline>
+                        <line x1="12" y1="15" x2="12" y2="3"></line>
+                    </svg>
+                    <span>Download File</span>
+                </a>
+            `;
+        } else {
+            bodyHtml = `<pre class="clip-content">${escapeHtml(item.content)}</pre>`;
+            actionBtnHtml = `
+                <button class="copy-btn" data-content="${encodeURIComponent(item.content)}">
+                    <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none">
+                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                    </svg>
+                    <span>Copy to Phone</span>
+                </button>
+            `;
+        }
 
         card.innerHTML = `
             <div class="card-header">
@@ -166,20 +274,18 @@ document.addEventListener("DOMContentLoaded", () => {
                 </span>
                 <span class="clip-timestamp" title="${item.timestamp || ''}">${timeFormatted}</span>
             </div>
-            <pre class="clip-content">${escapeHtml(item.content)}</pre>
+            ${bodyHtml}
             <div class="card-actions">
-                <button class="copy-btn" data-content="${encodeURIComponent(item.content)}">
-                    <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none">
-                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-                    </svg>
-                    <span>Copy to Phone</span>
-                </button>
+                ${actionBtnHtml}
             </div>
         `;
 
-        const copyBtn = card.querySelector(".copy-btn");
-        copyBtn.addEventListener("click", () => handleCopyClick(copyBtn, item.content));
+        if (itemType === "text") {
+            const copyBtn = card.querySelector(".copy-btn");
+            if (copyBtn) {
+                copyBtn.addEventListener("click", () => handleCopyClick(copyBtn, item.content));
+            }
+        }
 
         if (!isInitial) {
             clipboardList.prepend(card);
@@ -253,10 +359,44 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     // Event Listeners
+    uploadImgBtn.addEventListener("click", () => imageInput.click());
+    uploadFileBtn.addEventListener("click", () => fileInput.click());
+
+    imageInput.addEventListener("change", (e) => {
+        if (e.target.files && e.target.files[0]) {
+            uploadAndTransmitFile(e.target.files[0]);
+            imageInput.value = "";
+        }
+    });
+
+    fileInput.addEventListener("change", (e) => {
+        if (e.target.files && e.target.files[0]) {
+            uploadAndTransmitFile(e.target.files[0]);
+            fileInput.value = "";
+        }
+    });
+
+    // Intercept image paste from phone/browser clipboard
+    document.addEventListener("paste", (e) => {
+        if (e.clipboardData && e.clipboardData.items) {
+            const items = e.clipboardData.items;
+            for (let i = 0; i < items.length; i++) {
+                if (items[i].type.indexOf("image") !== -1) {
+                    const blob = items[i].getAsFile();
+                    if (blob) {
+                        e.preventDefault();
+                        uploadAndTransmitFile(blob);
+                        return;
+                    }
+                }
+            }
+        }
+    });
+
     sendBtn.addEventListener("click", () => {
         const text = sendInput.value;
         if (!text.trim()) {
-            showToast("Please enter or paste some text first", "info");
+            showToast("Please enter text or choose an image/file first", "info");
             return;
         }
         transmitClipboard(text);
@@ -265,6 +405,18 @@ document.addEventListener("DOMContentLoaded", () => {
 
     pasteAndSendBtn.addEventListener("click", async () => {
         try {
+            if (navigator.clipboard && navigator.clipboard.read) {
+                const items = await navigator.clipboard.read();
+                for (const item of items) {
+                    for (const type of item.types) {
+                        if (type.startsWith("image/")) {
+                            const blob = await item.getType(type);
+                            uploadAndTransmitFile(blob);
+                            return;
+                        }
+                    }
+                }
+            }
             if (navigator.clipboard && navigator.clipboard.readText) {
                 const clipText = await navigator.clipboard.readText();
                 if (clipText && clipText.trim()) {
