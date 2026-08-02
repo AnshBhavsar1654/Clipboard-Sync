@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>ClipBoardSync — Local Clipboard Bridge</title>
+    <meta name="description"
+        content="Send text and links between your phone and computer instantly over your local Wi-Fi network. No cloud, no accounts.">
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+        rel="stylesheet">
+
+    <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+    <main class="app-container">
+
+        <!-- Header -->
+        <header id="app-header" class="header">
+            <div class="logo-group">
+                <div class="logo-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="1.6" fill="none"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="2" y="7" width="7" height="10" rx="1.4"></rect>
+                        <rect x="15" y="4" width="7" height="16" rx="1.4"></rect>
+                        <path d="M9 12h6"></path>
+                    </svg>
+                </div>
+                <div class="title-wrap">
+                    <h1 id="page-title">ClipBoardSync</h1>
+                    <p class="subtitle">Local network &middot; no cloud</p>
+                </div>
+            </div>
+
+            <div id="connection-status" class="status-indicator">
+                <span id="connection-badge" class="badge connecting">
+                    <span class="pulse-dot" aria-hidden="true"></span>
+                    <span id="status-text">Connecting</span>
+                </span>
+            </div>
+        </header>
+
+        <!-- Compose / send panel -->
+        <section id="send-section" class="panel" aria-labelledby="send-title">
+            <div class="panel-header">
+                <h2 id="send-title" class="eyebrow">Send to computer</h2>
+            </div>
+
+            <div class="input-container">
+                <textarea id="send-input" placeholder="Type or paste text to send to your computer&hellip;" rows="4"
+                    aria-label="Text to send to your computer"></textarea>
+                <button id="clear-btn" class="icon-btn" title="Clear text" aria-label="Clear input">
+                    <svg viewBox="0 0 24 24" width="15" height="15" stroke="currentColor" stroke-width="2" fill="none"
+                        stroke-linecap="round">
+                        <line x1="18" y1="6" x2="6" y2="18"></line>
+                        <line x1="6" y1="6" x2="18" y2="18"></line>
+                    </svg>
+                </button>
+            </div>
+
+            <div class="button-toolbar">
+                <button id="paste-and-send-btn" class="secondary-btn"
+                    title="Paste from your phone's clipboard and send immediately">
+                    <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="1.8" fill="none"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path>
+                        <rect x="8" y="2" width="8" height="4" rx="1"></rect>
+                    </svg>
+                    Paste &amp; send
+                </button>
+                <button id="send-btn" class="primary-btn">
+                    <span>Send</span>
+                    <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2.2" fill="none"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="5" y1="12" x2="19" y2="12"></line>
+                        <polyline points="12 5 19 12 12 19"></polyline>
+                    </svg>
+                </button>
+            </div>
+        </section>
+
+        <!-- Live feed -->
+        <section id="feed-section" class="feed-section" aria-labelledby="feed-title">
+            <div class="feed-header">
+                <div class="feed-header-left">
+                    <h2 id="feed-title" class="eyebrow">Live feed</h2>
+                    <span id="item-counter" class="counter">0 items</span>
+                </div>
+                <button id="clear-feed-btn" class="text-btn" title="Clear visible items">Clear</button>
+            </div>
+
+            <!-- Empty state -->
+            <div id="empty-state" class="empty-state">
+                <p class="empty-title">Nothing sent yet</p>
+                <p class="empty-body">Copy something on your computer, or send text above &mdash; it will appear here
+                    right away.</p>
+            </div>
+
+            <div id="clipboard-list" class="feed-list">
+                <!-- Populated by app.js -->
+            </div>
+        </section>
+    </main>
+
+    <div id="toast-container" class="toast-container" aria-live="polite"></div>
+
+    <script src="app.js"></script>
+</body>
+
+</html>
