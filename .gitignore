@@ -2,16 +2,23 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+.venv/
+venv/
+env/
+ENV/
+
 build/
 dist/
 wheels/
 *.egg-info/
 .eggs/
 
+*.spec.bak
+
 .pytest_cache/
 .coverage
-htmlcov/
 .coverage.*
+htmlcov/
 
 .mypy_cache/
 .ruff_cache/
@@ -20,20 +27,15 @@ htmlcov/
 
 .ipynb_checkpoints/
 
-.venv/
-venv/
-env/
-ENV/
-
 .vscode/
-
-.DS_Store
-Thumbs.db
-
-*.log
+.idea/
 
 .env
 .env.*
 
+*.log
 *.tmp
 *.swp
+
+.DS_Store
+Thumbs.db

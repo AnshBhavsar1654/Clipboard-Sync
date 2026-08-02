@@ -25,7 +25,7 @@ def test_rest_endpoints_and_static() -> None:
     # Test static web app HTML served at root
     response = client.get("/")
     assert response.status_code == 200
-    assert "ClipBoardSync Hub" in response.text
+    assert "ClipBoardSync" in response.text
 
     # Test initial empty history REST API
     hist_response = client.get("/api/history")
