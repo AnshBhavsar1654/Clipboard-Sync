@@ -1,6 +1,8 @@
 /**
  * ClipBoardSync Real-Time Frontend Logic
- * Manages WebSocket persistence, clipboard syncing, and responsive UI micro-interactions.
+ * Manages WebSocket persistence, clipboard syncing, searchable feed, and
+ * responsive UI micro-interactions. Follows DESIGN.md (vector icons, clean
+ * list, keyboard-first search).
  */
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -20,11 +22,12 @@ document.addEventListener("DOMContentLoaded", () => {
     const emptyState = document.getElementById("empty-state");
     const itemCounter = document.getElementById("item-counter");
     const toastContainer = document.getElementById("toast-container");
+    const feedSearch = document.getElementById("feed-search");
 
     // Device Identification Setup
     let deviceId = localStorage.getItem("clipboardsync_device_id");
     if (!deviceId) {
-        const platform = (navigator.userAgent.includes("Mobi") || navigator.userAgent.includes("Android") || navigator.userAgent.includes("iPhone")) 
+        const platform = (navigator.userAgent.includes("Mobi") || navigator.userAgent.includes("Android") || navigator.userAgent.includes("iPhone"))
             ? "Phone" : "Web";
         deviceId = `${platform}-${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
         localStorage.setItem("clipboardsync_device_id", deviceId);
@@ -33,12 +36,15 @@ document.addEventListener("DOMContentLoaded", () => {
     // Dynamic WebSocket Connection setup
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const wsUrl = `${protocol}//${window.location.host}/ws`;
-    
+
     let ws = null;
     let reconnectDelay = 1000;
     const maxReconnectDelay = 15000;
-    let itemsCount = 0;
     let isConnecting = false;
+
+    // Feed state: canonical items (newest first) + currently visible subset
+    let feedItems = [];
+    let visibleItems = [];
 
     // Connect WebSocket
     function connect() {
@@ -106,17 +112,14 @@ document.addEventListener("DOMContentLoaded", () => {
     // Message Processing
     function handleIncomingMessage(msg) {
         if (msg.type === "history" && Array.isArray(msg.items)) {
-            // Render initial history batch
-            clipboardList.innerHTML = "";
-            itemsCount = 0;
-            const sorted = msg.items.slice().reverse();
-            sorted.forEach(item => renderClipCard(item, true));
-            updateEmptyState();
+            feedItems = msg.items.slice().reverse(); // newest first
+            itemCounter.textContent = `${feedItems.length} ${feedItems.length === 1 ? "item" : "items"}`;
+            applyFilter();
         } else if ((msg.type === "text" || msg.type === "image" || msg.type === "file") && (msg.content || msg.file_url)) {
-            // Real-time incoming clip
-            renderClipCard(msg, false);
-            updateEmptyState();
-            
+            feedItems.unshift(msg);
+            itemCounter.textContent = `${feedItems.length} ${feedItems.length === 1 ? "item" : "items"}`;
+            applyFilter();
+
             if (msg.device_id !== deviceId) {
                 const label = msg.type === "image" ? "New Image" : (msg.type === "file" ? "New File" : "New Clip");
                 showToast(`${label} from ${formatDeviceName(msg.device_id)}`, "info");
@@ -161,8 +164,9 @@ document.addEventListener("DOMContentLoaded", () => {
             };
 
             ws.send(JSON.stringify(payload));
-            renderClipCard(payload, false);
-            updateEmptyState();
+            feedItems.unshift(payload);
+            itemCounter.textContent = `${feedItems.length} ${feedItems.length === 1 ? "item" : "items"}`;
+            applyFilter();
             showToast(`Transmitted ${data.filename} to Computer!`, "success");
         } catch (err) {
             console.error("Upload failed:", err);
@@ -186,27 +190,54 @@ document.addEventListener("DOMContentLoaded", () => {
         };
 
         ws.send(JSON.stringify(payload));
-        
+
         // Optimistically show in our feed
-        renderClipCard(payload, false);
-        updateEmptyState();
+        feedItems.unshift(payload);
+        itemCounter.textContent = `${feedItems.length} ${feedItems.length === 1 ? "item" : "items"}`;
+        applyFilter();
         showToast("Transmitted to your Computer!", "success");
     }
 
+    // Search / Filter
+    function matchesQuery(item, q) {
+        return [item.content, item.filename, item.device_id, item.type]
+            .filter(Boolean)
+            .join(" ")
+            .toLowerCase()
+            .includes(q);
+    }
+
+    function applyFilter() {
+        const q = feedSearch.value.trim().toLowerCase();
+        visibleItems = q ? feedItems.filter(item => matchesQuery(item, q)) : feedItems.slice();
+        renderAll(visibleItems);
+        updateEmptyState(q, visibleItems.length);
+    }
+
+    function renderAll(items) {
+        clipboardList.innerHTML = "";
+        items.forEach(item => {
+            clipboardList.appendChild(buildClipCard(item));
+        });
+    }
+
     // UI Rendering
-    function renderClipCard(item, isInitial = false) {
-        itemsCount++;
-        itemCounter.textContent = `${itemsCount} ${itemsCount === 1 ? 'item' : 'items'}`;
-        
+    function deviceIconSvg(isLaptop) {
+        return isLaptop
+            ? '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="12" rx="2"></rect><line x1="9" y1="20" x2="15" y2="20"></line><line x1="12" y1="16" x2="12" y2="20"></line></svg>'
+            : '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2" width="10" height="20" rx="2"></rect><line x1="11" y1="18" x2="13" y2="18"></line></svg>';
+    }
+
+    function buildClipCard(item) {
         const card = document.createElement("div");
         card.className = "clip-card";
         card.dataset.id = item.id || Date.now();
 
         const isLaptop = item.device_id && (item.device_id.toLowerCase().includes("win") || item.device_id.toLowerCase().includes("desktop") || item.device_id.toLowerCase().includes("laptop") || item.device_id.length > 25);
         const deviceTagClass = isLaptop ? "laptop" : "phone";
-        const deviceIcon = isLaptop ? "💻" : "📱";
+        const deviceIcon = deviceIconSvg(isLaptop);
         const deviceName = formatDeviceName(item.device_id);
-        
+
         const timeFormatted = formatTime(item.timestamp);
         const itemType = item.type || "text";
 
@@ -221,7 +252,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 </div>
             `;
             actionBtnHtml = `
-                <a href="${imgSrc}" download="${item.filename || 'synced_image.png'}" class="copy-btn link-btn" target="_blank">
+                <a href="${imgSrc}" download="${item.filename || "synced_image.png"}" class="copy-btn link-btn" target="_blank" rel="noopener">
                     <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none">
                         <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
                         <polyline points="7 10 12 15 17 10"></polyline>
@@ -232,11 +263,15 @@ document.addEventListener("DOMContentLoaded", () => {
             `;
         } else if (itemType === "file") {
             const fname = item.filename || "File";
-            const fsize = item.filesize ? (item.filesize < 1024*1024 ? `${(item.filesize/1024).toFixed(1)} KB` : `${(item.filesize/(1024*1024)).toFixed(1)} MB`) : "";
+            const fsize = item.filesize ? (item.filesize < 1024 * 1024 ? `${(item.filesize / 1024).toFixed(1)} KB` : `${(item.filesize / (1024 * 1024)).toFixed(1)} MB`) : "";
             const fileHref = item.file_url || "#";
             bodyHtml = `
                 <div class="file-card-box">
-                    <div class="file-icon-badge">📁</div>
+                    <div class="file-icon-badge">
+                        <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linejoin="round">
+                            <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
+                        </svg>
+                    </div>
                     <div class="file-details">
                         <span class="file-name-title">${escapeHtml(fname)}</span>
                         <span class="file-size-subtitle">${fsize}</span>
@@ -244,7 +279,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 </div>
             `;
             actionBtnHtml = `
-                <a href="${fileHref}" download="${escapeHtml(fname)}" class="copy-btn link-btn" target="_blank">
+                <a href="${fileHref}" download="${escapeHtml(fname)}" class="copy-btn link-btn" target="_blank" rel="noopener">
                     <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none">
                         <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
                         <polyline points="7 10 12 15 17 10"></polyline>
@@ -269,10 +304,10 @@ document.addEventListener("DOMContentLoaded", () => {
         card.innerHTML = `
             <div class="card-header">
                 <span class="device-tag ${deviceTagClass}">
-                    <span>${deviceIcon}</span>
+                    ${deviceIcon}
                     <span>${deviceName}</span>
                 </span>
-                <span class="clip-timestamp" title="${item.timestamp || ''}">${timeFormatted}</span>
+                <span class="clip-timestamp" title="${item.timestamp || ""}">${timeFormatted}</span>
             </div>
             ${bodyHtml}
             <div class="card-actions">
@@ -287,11 +322,7 @@ document.addEventListener("DOMContentLoaded", () => {
             }
         }
 
-        if (!isInitial) {
-            clipboardList.prepend(card);
-        } else {
-            clipboardList.appendChild(card);
-        }
+        return card;
     }
 
     async function handleCopyClick(btn, text) {
@@ -325,9 +356,18 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     }
 
-    function updateEmptyState() {
-        if (itemsCount === 0) {
+    function updateEmptyState(query, count) {
+        if (count === 0 && !query) {
             emptyState.style.display = "flex";
+            emptyState.querySelector(".empty-title").textContent = "Nothing sent yet";
+            emptyState.querySelector(".empty-body").textContent =
+                "Copy something on your computer, or send text above — it will appear here right away.";
+            clipboardList.style.display = "none";
+        } else if (count === 0 && query) {
+            emptyState.style.display = "flex";
+            emptyState.querySelector(".empty-title").textContent = "No matches";
+            emptyState.querySelector(".empty-body").textContent =
+                `Nothing matched “${query}”. Try a different search.`;
             clipboardList.style.display = "none";
         } else {
             emptyState.style.display = "none";
@@ -338,10 +378,10 @@ document.addEventListener("DOMContentLoaded", () => {
     function showToast(message, type = "info") {
         const toast = document.createElement("div");
         toast.className = `toast ${type}`;
-        
-        const iconSvg = type === "success" 
-            ? `<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="3" fill="none"><polyline points="20 6 9 17 4 12"></polyline></svg>`
-            : `<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2.5" fill="none"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>`;
+
+        const iconSvg = type === "success"
+            ? '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="3" fill="none"><polyline points="20 6 9 17 4 12"></polyline></svg>'
+            : '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2.5" fill="none"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>';
 
         toast.innerHTML = `
             <div class="toast-icon">${iconSvg}</div>
@@ -373,6 +413,19 @@ document.addEventListener("DOMContentLoaded", () => {
         if (e.target.files && e.target.files[0]) {
             uploadAndTransmitFile(e.target.files[0]);
             fileInput.value = "";
+        }
+    });
+
+    feedSearch.addEventListener("input", applyFilter);
+
+    document.addEventListener("keydown", (e) => {
+        if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+            e.preventDefault();
+            feedSearch.focus();
+            feedSearch.select();
+        } else if (e.key === "Escape" && document.activeElement === feedSearch) {
+            feedSearch.value = "";
+            applyFilter();
         }
     });
 
@@ -443,10 +496,9 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 
     clearFeedBtn.addEventListener("click", () => {
-        clipboardList.innerHTML = "";
-        itemsCount = 0;
+        feedItems = [];
         itemCounter.textContent = "0 items";
-        updateEmptyState();
+        applyFilter();
         showToast("Cleared view on this device", "info");
     });
 
@@ -484,18 +536,18 @@ document.addEventListener("DOMContentLoaded", () => {
             const now = new Date();
             const diffMs = now - date;
             const diffMin = Math.floor(diffMs / 60000);
-            
+
             if (diffMin < 1) return "Just now";
             if (diffMin < 60) return `${diffMin}m ago`;
             const diffHours = Math.floor(diffMin / 60);
             if (diffHours < 24) return `${diffHours}h ago`;
-            return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
         } catch (e) {
             return "Just now";
         }
     }
 
     // Initialize connection and empty state
-    updateEmptyState();
+    updateEmptyState("", 0);
     connect();
 });
