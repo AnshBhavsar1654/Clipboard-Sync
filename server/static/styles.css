@@ -1,33 +1,33 @@
 /*
    ClipBoardSync — interface styles
-   A local utility tool, styled like an instrument panel: flat surfaces,
-   one accent per device, a signal-line feed instead of a decorated log.
+   Follows DESIGN.md: a neutral dark surface, one indigo accent,
+   restrained radius, clean list-based history, vector icons, no emoji.
 */
 
 :root {
-  --bg: #15171C;
-  --surface: #1B1E24;
-  --surface-raised: #22252C;
-  --border: #2A2D35;
+  --bg: #0D0F12;
+  --surface: #15181D;
+  --surface-raised: #1C2128;
+  --border: #292E36;
   --border-strong: #3A3E48;
 
-  --ink: #ECE9E2;
-  --ink-soft: #9297A1;
-  --ink-faint: #5C6068;
+  --ink: #F3F4F6;
+  --ink-soft: #9CA3AF;
+  --ink-faint: #6B7280;
 
-  --signal: #E0954A;
-  /* phone → outgoing */
-  --signal-ink: #17130D;
-  --wire: #6C93AE;
-  /* computer → incoming */
-  --positive: #6FAE8C;
-  --danger: #C4675A;
+  --primary: #818CF8;
+  --primary-strong: #6366F1;
+  --on-accent: #0D0F12;
 
-  --font-display: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, sans-serif;
-  --font-mono: 'IBM Plex Mono', 'SFMono-Regular', monospace;
+  --positive: #34D399;
+  --warning: #FBBF24;
+  --danger: #F87171;
 
-  --radius: 8px;
-  --radius-sm: 5px;
+  --font-display: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: 'SFMono-Regular', 'Consolas', 'Liberation Mono', monospace;
+
+  --radius: 10px;
+  --radius-sm: 6px;
 }
 
 * {
@@ -49,11 +49,11 @@ body {
 
 .app-container {
   width: 100%;
-  max-width: 480px;
-  padding: 20px 16px 64px;
+  max-width: 520px;
+  padding: 24px 20px 80px;
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: 28px;
 }
 
 /* Header */
@@ -80,7 +80,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--signal);
+  color: var(--primary);
   flex-shrink: 0;
 }
 
@@ -107,7 +107,7 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  padding: 4px 10px;
+  padding: 5px 11px;
   border-radius: 20px;
   font-size: 0.72rem;
   font-weight: 500;
@@ -127,8 +127,8 @@ body {
 }
 
 .badge.connecting {
-  color: var(--signal);
-  border-color: rgba(224, 149, 74, 0.3);
+  color: var(--warning);
+  border-color: rgba(251, 191, 36, 0.35);
 }
 
 .badge.connecting .pulse-dot {
@@ -137,12 +137,12 @@ body {
 
 .badge.connected {
   color: var(--positive);
-  border-color: rgba(111, 174, 140, 0.3);
+  border-color: rgba(52, 211, 153, 0.35);
 }
 
 .badge.disconnected {
   color: var(--danger);
-  border-color: rgba(196, 103, 90, 0.3);
+  border-color: rgba(248, 113, 113, 0.35);
 }
 
 @keyframes pulse {
@@ -157,7 +157,7 @@ body {
   }
 }
 
-/* Generic flat panel (compose section) */
+/* Generic flat panel */
 .panel {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -200,7 +200,7 @@ textarea {
 
 textarea:focus {
   outline: none;
-  border-color: var(--signal);
+  border-color: var(--primary);
 }
 
 textarea::placeholder {
@@ -253,16 +253,16 @@ button {
 }
 
 button:active {
-  transform: scale(0.98);
+  opacity: 0.85;
 }
 
 .primary-btn {
-  background: var(--signal);
-  color: var(--signal-ink);
+  background: var(--primary);
+  color: var(--on-accent);
 }
 
 .primary-btn:hover {
-  background: #e8a260;
+  background: var(--primary-strong);
 }
 
 .secondary-btn {
@@ -275,6 +275,29 @@ button:active {
   background: var(--surface-raised);
   color: var(--ink);
   border-color: var(--ink-faint);
+}
+
+/* Search */
+.feed-search {
+  width: 100%;
+  margin-bottom: 16px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-size: 0.88rem;
+  padding: 10px 12px;
+  transition: border-color 0.15s ease;
+}
+
+.feed-search::placeholder {
+  color: var(--ink-faint);
+}
+
+.feed-search:focus {
+  outline: none;
+  border-color: var(--primary);
 }
 
 /* Feed section */
@@ -336,68 +359,51 @@ button:active {
   max-width: 40ch;
 }
 
-/* Feed list — a signal line connects entries in chronological order */
+/* Feed list — clean, separated rows */
 .feed-list {
-  position: relative;
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  padding-left: 18px;
-}
-
-.feed-list:has(.clip-card)::before {
-  content: '';
-  position: absolute;
-  top: 6px;
-  bottom: 6px;
-  left: 3px;
-  width: 1px;
-  background: var(--border-strong);
+  gap: 10px;
 }
 
 .clip-card {
-  position: relative;
-  padding: 12px 0 12px 14px;
-}
-
-.clip-card::before {
-  content: '';
-  position: absolute;
-  top: 6px;
-  left: -18px;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--signal);
-  border: 2px solid var(--bg);
-}
-
-.clip-card:has(.device-tag.laptop)::before {
-  background: var(--wire);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
 }
 
 .card-header {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 10px;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
   font-family: var(--font-mono);
   font-size: 0.74rem;
 }
 
 .clip-timestamp {
   color: var(--ink-faint);
+  flex-shrink: 0;
 }
 
 .device-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-weight: 500;
-  color: var(--signal);
+  color: var(--ink-soft);
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
 
-.device-tag.laptop {
-  color: var(--wire);
+.device-tag svg {
+  color: var(--primary);
+}
+
+.device-tag.laptop svg {
+  color: var(--positive);
 }
 
 .clip-content {
@@ -405,7 +411,7 @@ button:active {
   font-size: 0.85rem;
   line-height: 1.55;
   color: var(--ink);
-  background: var(--surface);
+  background: var(--bg);
   border: 1px solid var(--border);
   padding: 10px 12px;
   border-radius: var(--radius-sm);
@@ -434,7 +440,7 @@ button:active {
   background: transparent;
   color: var(--ink-soft);
   border: 1px solid var(--border-strong);
-  padding: 5px 12px;
+  padding: 6px 12px;
   font-size: 0.78rem;
   font-weight: 500;
 }
@@ -446,7 +452,7 @@ button:active {
 
 .copy-btn.copied {
   color: var(--positive);
-  border-color: rgba(111, 174, 140, 0.4);
+  border-color: rgba(52, 211, 153, 0.4);
 }
 
 /* Toasts */
@@ -521,25 +527,26 @@ button:active {
 }
 
 .toast.info {
-  border-left-color: var(--wire);
+  border-left-color: var(--primary);
 }
 
 .toast.info .toast-icon {
-  background: var(--wire);
+  background: var(--primary);
 }
 
 /* Focus visibility */
 button:focus-visible,
 textarea:focus-visible,
+.feed-search:focus-visible,
 .text-btn:focus-visible {
-  outline: 2px solid var(--signal);
+  outline: 2px solid var(--primary);
   outline-offset: 2px;
 }
 
 /* Responsive */
 @media (max-width: 380px) {
   .app-container {
-    padding: 16px 12px 56px;
+    padding: 18px 14px 72px;
   }
 
   .button-toolbar {
@@ -576,7 +583,7 @@ textarea:focus-visible,
   margin-bottom: 12px;
   overflow: hidden;
   border-radius: var(--radius-sm);
-  background: var(--surface-low);
+  background: var(--bg);
   display: flex;
   justify-content: center;
   align-items: center;
@@ -595,15 +602,17 @@ textarea:focus-visible,
   align-items: center;
   gap: 12px;
   padding: 12px 14px;
-  background: var(--surface-raised);
-  border: 1px solid var(--border-soft);
+  background: var(--bg);
+  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   margin-bottom: 12px;
 }
 
 .file-icon-badge {
-  font-size: 1.6rem;
-  line-height: 1;
+  color: var(--primary);
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
 }
 
 .file-details {

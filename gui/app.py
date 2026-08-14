@@ -1,4 +1,9 @@
-"""Windows Desktop GUI implementation for ClipBoardSync using CustomTkinter."""
+"""Windows Desktop GUI implementation for ClipBoardSync using CustomTkinter.
+
+The interface follows the DESIGN.md design system: a neutral dark surface,
+one indigo accent, restrained radius, clean list-based clipboard history,
+first-class search (Ctrl+K) and no emoji as structural icons.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +11,7 @@ import asyncio
 import base64
 import datetime
 import io
+import json
 import logging
 import queue
 import socket
@@ -20,7 +26,7 @@ from typing import Any
 import customtkinter as ctk
 import win32clipboard
 import win32con
-from PIL import Image
+from PIL import Image, ImageDraw
 import qrcode
 import uvicorn
 
@@ -28,8 +34,31 @@ from client.config import Config
 from client.main import ClipBoardSyncApp
 from server.main import app as fastapi_app, hub as sync_hub
 
+# ---------------------------------------------------------------------------
+# Design tokens (DESIGN.md — dark palette)
+# ---------------------------------------------------------------------------
+BG = "#0D0F12"
+SURFACE = "#15181D"
+SURFACE_RAISED = "#1C2128"
+BORDER = "#292E36"
+HOVER = "#262B34"
+TEXT = "#F3F4F6"
+TEXT_SECONDARY = "#9CA3AF"
+TEXT_FAINT = "#6B7280"
+PRIMARY = "#818CF8"
+PRIMARY_STRONG = "#6366F1"
+SUCCESS = "#34D399"
+WARNING = "#FBBF24"
+DANGER = "#F87171"
+ON_ACCENT = "#0D0F12"
 
-# Configure default visual styling
+RADIUS_SM = 6
+RADIUS_CARD = 10
+FONT = "Segoe UI"
+MONO = "Consolas"
+
+TYPE_COLORS = {"text": SUCCESS, "image": PRIMARY, "file": WARNING}
+
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
@@ -50,8 +79,112 @@ def get_local_lan_ip() -> str:
             return "127.0.0.1"
 
 
+# ---------------------------------------------------------------------------
+# Line icon rendering (vector-style, no emoji) via 4x supersampled PIL draws
+# ---------------------------------------------------------------------------
+
+def _d_clipboard(d: ImageDraw.ImageDraw, c: str, s: int) -> None:
+    d.rounded_rectangle((3 * s, 4 * s, 13 * s, 14 * s), radius=2 * s, outline=c, width=s)
+    d.rectangle((5 * s, 2 * s, 11 * s, 4 * s), fill=c)
+    d.line((6 * s, 8 * s, 10 * s, 8 * s), fill=c, width=s)
+    d.line((6 * s, 11 * s, 10 * s, 11 * s), fill=c, width=s)
+
+
+def _d_pin(d: ImageDraw.ImageDraw, c: str, s: int) -> None:
+    d.line((8 * s, 3 * s, 8 * s, 13 * s), fill=c, width=s)
+    d.line((5 * s, 6 * s, 11 * s, 6 * s), fill=c, width=s)
+    d.ellipse((6 * s, 1 * s, 10 * s, 5 * s), outline=c, width=s)
+
+
+def _d_folder(d: ImageDraw.ImageDraw, c: str, s: int) -> None:
+    d.line((3 * s, 5 * s, 6 * s, 3 * s, 9 * s, 3 * s, 11 * s, 5 * s), fill=c, width=s)
+    d.rounded_rectangle((3 * s, 5 * s, 13 * s, 12 * s), radius=1 * s, outline=c, width=s)
+    d.line((3 * s, 8 * s, 13 * s, 8 * s), fill=c, width=s)
+
+
+def _d_devices(d: ImageDraw.ImageDraw, c: str, s: int) -> None:
+    d.rectangle((2 * s, 4 * s, 9 * s, 10 * s), outline=c, width=s)
+    d.line((5 * s, 10 * s, 5 * s, 13 * s), fill=c, width=s)
+    d.line((3 * s, 13 * s, 8 * s, 13 * s), fill=c, width=s)
+    d.rectangle((11 * s, 6 * s, 15 * s, 14 * s), outline=c, width=s)
+    d.line((12 * s, 12 * s, 14 * s, 12 * s), fill=c, width=s)
+
+
+def _d_settings(d: ImageDraw.ImageDraw, c: str, s: int) -> None:
+    d.line((3 * s, 4 * s, 13 * s, 4 * s), fill=c, width=s)
+    d.rectangle((7 * s, 3 * s, 9 * s, 5 * s), fill=c)
+    d.line((3 * s, 8 * s, 13 * s, 8 * s), fill=c, width=s)
+    d.rectangle((5 * s, 7 * s, 7 * s, 9 * s), fill=c)
+    d.line((3 * s, 12 * s, 13 * s, 12 * s), fill=c, width=s)
+    d.rectangle((10 * s, 11 * s, 12 * s, 13 * s), fill=c)
+
+
+def _d_search(d: ImageDraw.ImageDraw, c: str, s: int) -> None:
+    d.ellipse((3 * s, 3 * s, 10 * s, 10 * s), outline=c, width=s)
+    d.line((10 * s, 10 * s, 14 * s, 14 * s), fill=c, width=s)
+
+
+def _d_power(d: ImageDraw.ImageDraw, c: str, s: int) -> None:
+    d.ellipse((4 * s, 4 * s, 12 * s, 12 * s), outline=c, width=s)
+    d.line((8 * s, 2 * s, 8 * s, 7 * s), fill=c, width=s)
+
+
+def _d_copy(d: ImageDraw.ImageDraw, c: str, s: int) -> None:
+    d.rectangle((5 * s, 3 * s, 12 * s, 10 * s), outline=c, width=s)
+    d.rectangle((3 * s, 6 * s, 10 * s, 13 * s), outline=c, width=s)
+
+
+def _d_download(d: ImageDraw.ImageDraw, c: str, s: int) -> None:
+    d.line((8 * s, 3 * s, 8 * s, 11 * s), fill=c, width=s)
+    d.line((5 * s, 8 * s, 8 * s, 11 * s, 11 * s, 8 * s), fill=c, width=s)
+    d.line((3 * s, 13 * s, 13 * s, 13 * s), fill=c, width=s)
+
+
+def _d_doc(d: ImageDraw.ImageDraw, c: str, s: int) -> None:
+    d.rectangle((4 * s, 2 * s, 12 * s, 14 * s), outline=c, width=s)
+    d.line((6 * s, 5 * s, 10 * s, 5 * s), fill=c, width=s)
+    d.line((6 * s, 8 * s, 10 * s, 8 * s), fill=c, width=s)
+    d.line((6 * s, 11 * s, 10 * s, 11 * s), fill=c, width=s)
+
+
+def _d_image(d: ImageDraw.ImageDraw, c: str, s: int) -> None:
+    d.rounded_rectangle((2 * s, 3 * s, 14 * s, 13 * s), radius=1 * s, outline=c, width=s)
+    d.ellipse((5 * s, 5 * s, 7 * s, 7 * s), outline=c, width=s)
+    d.line((2 * s, 12 * s, 7 * s, 8 * s, 10 * s, 11 * s, 12 * s, 9 * s, 14 * s, 11 * s), fill=c, width=s)
+
+
+_ICON_DRAWS = {
+    "clipboard": _d_clipboard,
+    "pin": _d_pin,
+    "folder": _d_folder,
+    "devices": _d_devices,
+    "settings": _d_settings,
+    "search": _d_search,
+    "power": _d_power,
+    "copy": _d_copy,
+    "download": _d_download,
+    "doc": _d_doc,
+    "image": _d_image,
+}
+
+
+def _make_icon(name: str, color: str = TEXT_SECONDARY, size: int = 16) -> ctk.CTkImage:
+    """Render a 16px line icon from the vector registry with supersampling."""
+    draw_fn = _ICON_DRAWS[name]
+    s = 4
+    img = Image.new("RGBA", (size * s, size * s), (0, 0, 0, 0))
+    draw_fn(ImageDraw.Draw(img), color, s)
+    img = img.resize((size, size), Image.LANCZOS)
+    return ctk.CTkImage(light_image=img, dark_image=img, size=(size, size))
+
+
+# ---------------------------------------------------------------------------
+# Logging plumbing
+# ---------------------------------------------------------------------------
+
 class QueueLogHandler(logging.Handler):
     """Routes Python standard log stream directly to a GUI queue for displaying in real time."""
+
     def __init__(self, log_queue: queue.Queue[str]) -> None:
         super().__init__(level=logging.INFO)
         self.log_queue = log_queue
@@ -59,14 +192,14 @@ class QueueLogHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            msg = self.format(record)
-            self.log_queue.put(msg)
+            self.log_queue.put(self.format(record))
         except Exception:
             pass
 
 
 class StdoutRedirector:
     """Intercepts print statements across the app to stream seamlessly into the GUI console."""
+
     def __init__(self, log_queue: queue.Queue[str], original_stdout: Any) -> None:
         self.log_queue = log_queue
         self.original_stdout = original_stdout
@@ -84,6 +217,10 @@ class StdoutRedirector:
         if self.original_stdout:
             self.original_stdout.flush()
 
+
+# ---------------------------------------------------------------------------
+# Backend engine
+# ---------------------------------------------------------------------------
 
 class BackgroundEngine:
     """Manages concurrent execution of Uvicorn WebSocket server and Win32 Clipboard sync client."""
@@ -104,7 +241,7 @@ class BackgroundEngine:
             target=self._run_loop,
             args=(log_queue,),
             name="clipboardsync-worker",
-            daemon=True
+            daemon=True,
         )
         self._thread.start()
 
@@ -168,16 +305,19 @@ class BackgroundEngine:
         log_queue.put("[ENGINE] Synchronization bridge cleanly shut down.")
 
 
+# ---------------------------------------------------------------------------
+# Main application window
+# ---------------------------------------------------------------------------
+
 class ClipBoardSyncGUI(ctk.CTk):
     """Main Application graphical dashboard interface."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.title("ClipBoardSync - Universal Local Wi-Fi Clipboard Bridge")
-        self.geometry("980x640")
-        self.minsize(840, 560)
-        
-        # Windows taskbar & close protocols
+        self.title("ClipBoardSync — Local Wi-Fi Clipboard Bridge")
+        self.geometry("1020x680")
+        self.minsize(880, 560)
+
         self.protocol("WM_DELETE_WINDOW", self.on_close_request)
 
         # Internal state & queues
@@ -187,6 +327,10 @@ class ClipBoardSyncGUI(ctk.CTk):
         self.log_queue: queue.Queue[str] = queue.Queue()
         self.engine = BackgroundEngine(port=self.port)
         self.auto_scroll_logs = ctk.BooleanVar(value=True)
+        self._active_tab = "clipboard"
+        self.search_var = ctk.StringVar(value="")
+        self._pinned: dict[str, dict[str, Any]] = self._load_pins()
+        self._last_sig: tuple[tuple[str, ...], ...] = ()
 
         # Connect log redirectors
         self.log_handler = QueueLogHandler(self.log_queue)
@@ -196,543 +340,601 @@ class ClipBoardSyncGUI(ctk.CTk):
         sys.stdout = StdoutRedirector(self.log_queue, self.original_stdout)
 
         self._init_ui()
+        self.bind("<Control-k>", self._focus_search)
+        self.bind("<Control-l>", self._focus_search)
         self._start_automation()
 
+    # ------------------------------------------------------------------
+    # Layout construction
+    # ------------------------------------------------------------------
     def _init_ui(self) -> None:
-        """Construct visual components, sidebar navigation, and content view frames."""
-        # Grid structure: 1 sidebar column, 1 main expandable column
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
-        # --- LEFT SIDEBAR ---
-        self.sidebar_frame = ctk.CTkFrame(self, width=230, corner_radius=0, fg_color="#181824")
-        self.sidebar_frame.grid(row=0, column=0, sticky="nsew")
-        self.sidebar_frame.grid_rowconfigure(5, weight=1)
+        # --- Sidebar ---
+        self.sidebar = ctk.CTkFrame(self, width=208, corner_radius=0, fg_color=SURFACE)
+        self.sidebar.grid(row=0, column=0, sticky="nsew")
+        self.sidebar.grid_propagate(False)
+        self.sidebar.grid_rowconfigure(4, weight=1)
 
-        brand_label = ctk.CTkLabel(
-            self.sidebar_frame,
-            text="⚡ ClipBoardSync",
-            font=ctk.CTkFont(size=21, weight="bold"),
-            text_color="#00E5FF"
+        brand = ctk.CTkLabel(
+            self.sidebar,
+            text="ClipBoardSync",
+            font=ctk.CTkFont(family=FONT, size=18, weight="bold"),
+            text_color=TEXT,
+            anchor="w",
         )
-        brand_label.grid(row=0, column=0, padx=20, pady=(24, 4))
-        
-        sub_label = ctk.CTkLabel(
-            self.sidebar_frame,
-            text="Cross-Device Wi-Fi Bridge",
-            font=ctk.CTkFont(size=12),
-            text_color="#9FA8DA"
-        )
-        sub_label.grid(row=1, column=0, padx=20, pady=(0, 16))
+        brand.grid(row=0, column=0, padx=20, pady=(24, 2), sticky="w")
 
-        # Status badge indicator
+        sub = ctk.CTkLabel(
+            self.sidebar,
+            text="Local Wi-Fi clipboard bridge",
+            font=ctk.CTkFont(family=FONT, size=12),
+            text_color=TEXT_FAINT,
+            anchor="w",
+        )
+        sub.grid(row=1, column=0, padx=20, pady=(0, 20), sticky="w")
+
         self.status_badge = ctk.CTkLabel(
-            self.sidebar_frame,
-            text="  🔴 OFFLINE  ",
-            font=ctk.CTkFont(size=12, weight="bold"),
-            fg_color="#B71C1C",
-            text_color="#FFFFFF",
-            corner_radius=12,
-            height=26
+            self.sidebar,
+            text="● OFFLINE",
+            font=ctk.CTkFont(family=FONT, size=12, weight="bold"),
+            text_color=DANGER,
+            fg_color=SURFACE_RAISED,
+            corner_radius=RADIUS_CARD,
+            height=28,
+            anchor="w",
         )
-        self.status_badge.grid(row=2, column=0, padx=20, pady=(0, 20), sticky="ew")
+        self.status_badge.grid(row=2, column=0, padx=16, pady=(0, 18), sticky="ew")
 
-        # Navigation menu buttons
-        self.btn_tab_pairing = self._create_nav_button("📱 Mobile Pairing", 0, self._show_tab_pairing)
-        self.btn_tab_pairing.grid(row=3, column=0, padx=12, pady=6, sticky="ew")
+        nav = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        nav.grid(row=3, column=0, sticky="ew", padx=10)
+        nav.grid_columnconfigure(0, weight=1)
 
-        self.btn_tab_logs = self._create_nav_button("📝 Live Activity Logs", 1, self._show_tab_logs)
-        self.btn_tab_logs.grid(row=4, column=0, padx=12, pady=6, sticky="ew")
+        self.btn_clipboard = self._make_nav(nav, "Clipboard", "clipboard", 0, self._show_clipboard)
+        self.btn_pinned = self._make_nav(nav, "Pinned", "pin", 1, self._show_pinned)
+        self.btn_files = self._make_nav(nav, "Files", "folder", 2, self._show_files)
+        self.btn_devices = self._make_nav(nav, "Devices", "devices", 3, self._show_devices)
+        self.btn_settings = self._make_nav(nav, "Settings", "settings", 4, self._show_settings)
 
-        self.btn_tab_history = self._create_nav_button("🕒 Synced Clip History", 2, self._show_tab_history)
-        self.btn_tab_history.grid(row=5, column=0, padx=12, pady=6, sticky="nw")
+        self.conn_label = ctk.CTkLabel(
+            self.sidebar,
+            text="0 devices connected",
+            font=ctk.CTkFont(family=FONT, size=12),
+            text_color=TEXT_FAINT,
+            anchor="w",
+        )
+        self.conn_label.grid(row=5, column=0, padx=20, pady=(0, 8), sticky="w")
 
-        self.btn_tab_guide = self._create_nav_button("ℹ️ Help & Instructions", 3, self._show_tab_guide)
-        self.btn_tab_guide.grid(row=6, column=0, padx=12, pady=(6, 16), sticky="ew")
-
-        # Bottom engine toggle button
         self.toggle_engine_btn = ctk.CTkButton(
-            self.sidebar_frame,
-            text="▶ START BRIDGE",
-            font=ctk.CTkFont(size=14, weight="bold"),
-            height=42,
-            fg_color="#00C853",
-            hover_color="#00B248",
-            command=self.toggle_engine
+            self.sidebar,
+            text="START BRIDGE",
+            image=_make_icon("power", ON_ACCENT, 16),
+            font=ctk.CTkFont(family=FONT, size=13, weight="bold"),
+            height=40,
+            corner_radius=RADIUS_SM,
+            fg_color=PRIMARY,
+            hover_color=PRIMARY_STRONG,
+            text_color=ON_ACCENT,
+            command=self.toggle_engine,
         )
-        self.toggle_engine_btn.grid(row=7, column=0, padx=16, pady=(0, 24), sticky="ew")
+        self.toggle_engine_btn.grid(row=6, column=0, padx=16, pady=(0, 24), sticky="ew")
 
-        # --- MAIN CONTAINER AREA ---
-        self.main_container = ctk.CTkFrame(self, fg_color="#101018", corner_radius=0)
+        # --- Main container ---
+        self.main_container = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)
         self.main_container.grid(row=0, column=1, sticky="nsew")
         self.main_container.grid_columnconfigure(0, weight=1)
         self.main_container.grid_rowconfigure(0, weight=1)
 
-        # Build modular tab frames
-        self.tab_pairing = self._build_tab_pairing()
-        self.tab_logs = self._build_tab_logs()
-        self.tab_history = self._build_tab_history()
-        self.tab_guide = self._build_tab_guide()
+        self.tab_clipboard, self._clip_scroll = self._build_list_tab("Clipboard", with_search=True)
+        self.tab_pinned, self._pinned_scroll = self._build_list_tab("Pinned", with_search=False)
+        self.tab_files, self._files_scroll = self._build_list_tab("Files", with_search=False)
+        self.tab_devices = self._build_tab_devices()
+        self.tab_settings = self._build_tab_settings()
 
-        # Activate initial view
-        self._show_tab_pairing()
+        self._show_clipboard()
 
-    def _create_nav_button(self, text: str, idx: int, cmd: Any) -> ctk.CTkButton:
-        return ctk.CTkButton(
-            self.sidebar_frame,
+    def _make_nav(self, parent: ctk.CTkFrame, text: str, icon: str, row: int, cmd: Any) -> ctk.CTkButton:
+        btn = ctk.CTkButton(
+            parent,
             text=text,
+            image=_make_icon(icon),
             anchor="w",
-            font=ctk.CTkFont(size=14),
-            height=38,
+            font=ctk.CTkFont(family=FONT, size=14),
+            height=36,
+            corner_radius=RADIUS_SM,
             fg_color="transparent",
-            hover_color="#252538",
-            text_color="#E0E0E0",
-            command=cmd
+            hover_color=HOVER,
+            text_color=TEXT_SECONDARY,
+            command=cmd,
         )
+        btn.grid(row=row, column=0, pady=2, sticky="ew")
+        return btn
 
-    def _select_nav(self, selected_btn: ctk.CTkButton, active_frame: ctk.CTkFrame) -> None:
-        """Switch highlighted menu item and visible display view."""
-        for btn in (self.btn_tab_pairing, self.btn_tab_logs, self.btn_tab_history, self.btn_tab_guide):
-            btn.configure(fg_color="transparent" if btn != selected_btn else "#2A2A40", text_color="#FFFFFF" if btn == selected_btn else "#B0B0C0")
-        for frame in (self.tab_pairing, self.tab_logs, self.tab_history, self.tab_guide):
-            frame.grid_remove()
-        active_frame.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
+    def _select_nav(self, selected: ctk.CTkButton, name: str, frame: ctk.CTkFrame) -> None:
+        for btn in (self.btn_clipboard, self.btn_pinned, self.btn_files, self.btn_devices, self.btn_settings):
+            btn.configure(
+                fg_color=SURFACE_RAISED if btn is selected else "transparent",
+                text_color=TEXT if btn is selected else TEXT_SECONDARY,
+            )
+        for tab in (self.tab_clipboard, self.tab_pinned, self.tab_files, self.tab_devices, self.tab_settings):
+            tab.grid_remove()
+        self._active_tab = name
+        frame.grid(row=0, column=0, sticky="nsew", padx=24, pady=24)
 
-    def _show_tab_pairing(self) -> None:
-        self._select_nav(self.btn_tab_pairing, self.tab_pairing)
+    def _show_clipboard(self) -> None:
+        self._select_nav(self.btn_clipboard, "clipboard", self.tab_clipboard)
+        self._refresh_active_list()
 
-    def _show_tab_logs(self) -> None:
-        self._select_nav(self.btn_tab_logs, self.tab_logs)
+    def _show_pinned(self) -> None:
+        self._select_nav(self.btn_pinned, "pinned", self.tab_pinned)
+        self._refresh_active_list()
 
-    def _show_tab_history(self) -> None:
-        self._select_nav(self.btn_tab_history, self.tab_history)
-        self._refresh_history_view()
+    def _show_files(self) -> None:
+        self._select_nav(self.btn_files, "files", self.tab_files)
+        self._refresh_active_list()
 
-    def _show_tab_guide(self) -> None:
-        self._select_nav(self.btn_tab_guide, self.tab_guide)
+    def _show_devices(self) -> None:
+        self._select_nav(self.btn_devices, "devices", self.tab_devices)
 
-    # --- TAB 1: PAIRING & QR CODE ---
-    def _build_tab_pairing(self) -> ctk.CTkFrame:
+    def _show_settings(self) -> None:
+        self._select_nav(self.btn_settings, "settings", self.tab_settings)
+
+    def _focus_search(self, _event: Any = None) -> None:
+        if self._active_tab == "clipboard" and hasattr(self, "search_entry"):
+            self.search_entry.focus_set()
+            try:
+                self.search_entry.select_range(0, "end")
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------------
+    # List tabs (Clipboard / Pinned / Files)
+    # ------------------------------------------------------------------
+    def _build_list_tab(self, title: str, with_search: bool) -> tuple[ctk.CTkFrame, ctk.CTkScrollableFrame]:
+        frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
+        frame.grid_columnconfigure(0, weight=1)
+        frame.grid_rowconfigure(1, weight=1)
+
+        header = ctk.CTkFrame(frame, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        header.grid_columnconfigure(1, weight=1)
+
+        title_lbl = ctk.CTkLabel(
+            header,
+            text=title,
+            font=ctk.CTkFont(family=FONT, size=20, weight="bold"),
+            text_color=TEXT,
+            anchor="w",
+        )
+        title_lbl.grid(row=0, column=0, sticky="w")
+
+        if with_search:
+            self.search_entry = ctk.CTkEntry(
+                header,
+                placeholder_text="Search clips…  (Ctrl+K)",
+                height=34,
+                width=280,
+                corner_radius=RADIUS_SM,
+                fg_color=SURFACE_RAISED,
+                border_color=BORDER,
+                text_color=TEXT,
+                placeholder_text_color=TEXT_FAINT,
+                textvariable=self.search_var,
+            )
+            self.search_entry.grid(row=0, column=1, sticky="e", padx=(16, 0))
+            self.search_entry.bind("<KeyRelease>", lambda _e: self._refresh_active_list())
+            self.search_entry.bind("<Escape>", lambda _e: self.search_entry.delete(0, "end"))
+
+        scroll = ctk.CTkScrollableFrame(frame, fg_color="transparent")
+        scroll.grid(row=1, column=0, sticky="nsew")
+        scroll.grid_columnconfigure(0, weight=1)
+        return frame, scroll
+
+    def _collect_items(self, pinned_only: bool = False, files_only: bool = False) -> list[dict[str, Any]]:
+        pinned = [self._pinned[k] for k in self._pinned]
+        if pinned_only:
+            return pinned
+        pinned_ids = set(self._pinned.keys())
+        hist = [i for i in reversed(sync_hub.get_history()) if i.get("id") not in pinned_ids]
+        items = pinned + hist
+        if files_only:
+            items = [i for i in items if i.get("type") in ("image", "file")]
+        return items
+
+    def _apply_search(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        q = self.search_var.get().strip().lower()
+        if not q:
+            return items
+        out = []
+        for i in items:
+            hay = " ".join([
+                str(i.get("content", "")),
+                str(i.get("filename", "")),
+                str(i.get("device_id", "")),
+                str(i.get("type", "")),
+            ]).lower()
+            if q in hay:
+                out.append(i)
+        return out
+
+    def _refresh_active_list(self) -> None:
+        if self._active_tab == "clipboard":
+            items = self._apply_search(self._collect_items())
+            self._render_item_list(self._clip_scroll, items, "No clips yet",
+                                   "Copy something on any connected device, or send from the Devices tab.")
+        elif self._active_tab == "pinned":
+            items = self._apply_search(self._collect_items(pinned_only=True))
+            self._render_item_list(self._pinned_scroll, items, "Nothing pinned yet",
+                                   "Use the pin button on any clip to keep it here.")
+        elif self._active_tab == "files":
+            items = self._apply_search(self._collect_items(files_only=True))
+            self._render_item_list(self._files_scroll, items, "No files or images yet",
+                                   "Sent files and images appear here.")
+
+    def _render_item_list(self, scroll: ctk.CTkScrollableFrame, items: list[dict[str, Any]],
+                          empty_title: str, empty_body: str) -> None:
+        for child in scroll.winfo_children():
+            child.destroy()
+
+        if not items:
+            e1 = ctk.CTkLabel(scroll, text=empty_title, font=ctk.CTkFont(family=FONT, size=15, weight="bold"),
+                              text_color=TEXT, anchor="w")
+            e1.grid(row=0, column=0, pady=(56, 4), sticky="w")
+            e2 = ctk.CTkLabel(scroll, text=empty_body, font=ctk.CTkFont(family=FONT, size=13),
+                              text_color=TEXT_FAINT, justify="left", anchor="w", wraplength=430)
+            e2.grid(row=1, column=0, sticky="w")
+            return
+
+        for idx, item in enumerate(items):
+            self._render_item_row(scroll, item, idx)
+
+    def _render_item_row(self, scroll: ctk.CTkScrollableFrame, item: dict[str, Any], row: int) -> None:
+        card = ctk.CTkFrame(scroll, fg_color=SURFACE_RAISED, corner_radius=RADIUS_CARD)
+        card.grid(row=row, column=0, sticky="ew", pady=6)
+        card.grid_columnconfigure(0, weight=1)
+
+        item_id = str(item.get("id", ""))
+        itype = item.get("type", "text")
+        is_pinned = item_id in self._pinned
+        content = str(item.get("content", ""))
+
+        # Left: content column
+        content_col = ctk.CTkFrame(card, fg_color="transparent")
+        content_col.grid(row=0, column=0, sticky="ew", padx=(14, 8), pady=12)
+        content_col.grid_columnconfigure(0, weight=1)
+
+        top = ctk.CTkFrame(content_col, fg_color="transparent")
+        top.grid(row=0, column=0, sticky="ew")
+        top.grid_columnconfigure(1, weight=1)
+
+        type_lbl = ctk.CTkLabel(
+            top, text=itype.upper(),
+            font=ctk.CTkFont(family=MONO, size=10, weight="bold"),
+            text_color=TYPE_COLORS.get(itype, TEXT_SECONDARY), anchor="w")
+        type_lbl.grid(row=0, column=0, sticky="w")
+
+        if is_pinned:
+            pin_marker = ctk.CTkLabel(top, text="PINNED",
+                                      font=ctk.CTkFont(family=MONO, size=10, weight="bold"),
+                                      text_color=PRIMARY, anchor="e")
+            pin_marker.grid(row=0, column=1, sticky="e")
+
+        # Body preview
+        if itype == "image":
+            self._render_image_body(content_col, content, item)
+        elif itype == "file":
+            fname = item.get("filename") or "File"
+            fsize = item.get("filesize") or 0
+            fsize_str = f"{fsize / 1024:.1f} KB" if fsize < 1024 * 1024 else f"{fsize / (1024 * 1024):.1f} MB"
+            lbl = ctk.CTkLabel(content_col, text=f"{fname}  ·  {fsize_str}",
+                               font=ctk.CTkFont(family=FONT, size=14), text_color=TEXT,
+                               justify="left", anchor="w", wraplength=520)
+            lbl.grid(row=1, column=0, pady=(8, 6), sticky="w")
+        else:
+            preview = _preview_text(content, 280)
+            lbl = ctk.CTkLabel(content_col, text=preview,
+                               font=ctk.CTkFont(family=FONT, size=14), text_color=TEXT,
+                               justify="left", anchor="w", wraplength=520)
+            lbl.grid(row=1, column=0, pady=(8, 6), sticky="w")
+
+        meta = ctk.CTkLabel(
+            content_col,
+            text=f"{_format_device(item.get('device_id'))}  ·  {_format_time(item.get('timestamp'))}",
+            font=ctk.CTkFont(family=FONT, size=12), text_color=TEXT_FAINT, anchor="w")
+        meta.grid(row=2, column=0, sticky="w")
+
+        # Right: actions
+        actions = ctk.CTkFrame(card, fg_color="transparent")
+        actions.grid(row=0, column=1, sticky="ne", padx=(4, 12), pady=12)
+
+        pin_btn = ctk.CTkButton(
+            actions, width=30, height=30, corner_radius=RADIUS_SM, text="",
+            image=_make_icon("pin", PRIMARY if is_pinned else TEXT_FAINT, 16),
+            fg_color="transparent", hover_color=HOVER,
+            command=lambda iid=item_id, it=item: self._toggle_pin(iid, it))
+        pin_btn.grid(row=0, column=0, pady=(0, 6))
+
+        if itype == "file":
+            file_url = str(item.get("file_url") or "")
+            if file_url and not file_url.startswith("http"):
+                file_url = f"{self.mobile_url}{file_url}"
+            act_btn = ctk.CTkButton(
+                actions, width=30, height=30, corner_radius=RADIUS_SM, text="",
+                image=_make_icon("download", TEXT_SECONDARY, 16),
+                fg_color="transparent", hover_color=HOVER,
+                command=lambda u=file_url: webbrowser.open(u) if u else None)
+        else:
+            act_btn = ctk.CTkButton(
+                actions, width=30, height=30, corner_radius=RADIUS_SM, text="",
+                image=_make_icon("copy", TEXT_SECONDARY, 16),
+                fg_color="transparent", hover_color=HOVER,
+                command=lambda c=content, t=itype: (self.copy_clip_to_local(c) if t == "text" else self.copy_image_to_local(c)))
+        act_btn.grid(row=1, column=0)
+
+    def _render_image_body(self, content_col: ctk.CTkFrame, content: str, item: dict[str, Any]) -> None:
+        """Render an image thumbnail when base64 data is embedded, else a text descriptor."""
+        try:
+            if content.startswith("data:image/"):
+                b64_part = content.split(",", 1)[1]
+                pil_img = Image.open(io.BytesIO(base64.b64decode(b64_part)))
+                pil_img.thumbnail((150, 100))
+                thumb = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=pil_img.size)
+                img_lbl = ctk.CTkLabel(content_col, image=thumb, text="")
+                img_lbl.grid(row=1, column=0, pady=(8, 6), sticky="w")
+                img_lbl.image = thumb
+                return
+        except Exception:
+            pass
+        fname = item.get("filename") or "Image"
+        lbl = ctk.CTkLabel(content_col, text=f"Image  ·  {fname}",
+                           font=ctk.CTkFont(family=FONT, size=14), text_color=TEXT,
+                           justify="left", anchor="w", wraplength=520)
+        lbl.grid(row=1, column=0, pady=(8, 6), sticky="w")
+
+    def _toggle_pin(self, item_id: str, item: dict[str, Any]) -> None:
+        if item_id in self._pinned:
+            del self._pinned[item_id]
+        else:
+            self._pinned[item_id] = item
+        self._save_pins()
+        self._refresh_active_list()
+
+    @staticmethod
+    def _load_pins() -> dict[str, dict[str, Any]]:
+        try:
+            p = Path.home() / ".clipboardsync" / "pins.json"
+            if p.exists():
+                data = json.loads(p.read_text(encoding="utf-8"))
+                return {str(k): v for k, v in data.items()}
+        except Exception:
+            pass
+        return {}
+
+    def _save_pins(self) -> None:
+        try:
+            p = Path.home() / ".clipboardsync" / "pins.json"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(self._pinned, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Devices tab (QR pairing)
+    # ------------------------------------------------------------------
+    def _build_tab_devices(self) -> ctk.CTkFrame:
         frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
         frame.grid_columnconfigure(1, weight=1)
         frame.grid_rowconfigure(0, weight=1)
 
-        # Left Column: QR Card
-        qr_card = ctk.CTkFrame(frame, fg_color="#1E1E2C", corner_radius=16)
+        # QR card
+        qr_card = ctk.CTkFrame(frame, fg_color=SURFACE, corner_radius=RADIUS_CARD)
         qr_card.grid(row=0, column=0, sticky="ns", padx=(0, 20))
-        
-        title_qr = ctk.CTkLabel(qr_card, text="Smartphone QR Pairing", font=ctk.CTkFont(size=18, weight="bold"))
-        title_qr.pack(pady=(24, 12), padx=24)
+        title_qr = ctk.CTkLabel(qr_card, text="Pair your phone",
+                                font=ctk.CTkFont(family=FONT, size=17, weight="bold"), text_color=TEXT)
+        title_qr.pack(pady=(22, 14), padx=24)
 
-        self.qr_label = ctk.CTkLabel(qr_card, text="", width=260, height=260)
-        self.qr_label.pack(padx=24, pady=12)
+        self.qr_label = ctk.CTkLabel(qr_card, text="", width=224, height=224)
+        self.qr_label.pack(padx=24)
         self._generate_qr_image(self.mobile_url)
 
-        qr_note = ctk.CTkLabel(
-            qr_card,
-            text="Scan with standard Android\nor iPhone Camera app",
-            font=ctk.CTkFont(size=13),
-            text_color="#9FA8DA"
-        )
-        qr_note.pack(pady=(4, 24), padx=24)
+        qr_note = ctk.CTkLabel(qr_card, text="Scan with your camera app\nto open the live portal",
+                               font=ctk.CTkFont(family=FONT, size=13), text_color=TEXT_FAINT)
+        qr_note.pack(pady=(12, 24), padx=24)
 
-        # Right Column: Details & Controls
-        details_card = ctk.CTkFrame(frame, fg_color="#1E1E2C", corner_radius=16)
-        details_card.grid(row=0, column=1, sticky="nsew")
-        details_card.grid_columnconfigure(0, weight=1)
+        # Details card
+        details = ctk.CTkFrame(frame, fg_color=SURFACE, corner_radius=RADIUS_CARD)
+        details.grid(row=0, column=1, sticky="nsew")
+        details.grid_columnconfigure(0, weight=1)
 
-        title_info = ctk.CTkLabel(
-            details_card,
-            text="How to Connect Your Devices",
-            font=ctk.CTkFont(size=20, weight="bold"),
-            anchor="w"
-        )
-        title_info.grid(row=0, column=0, padx=28, pady=(26, 10), sticky="w")
+        title_info = ctk.CTkLabel(details, text="Connect your devices",
+                                  font=ctk.CTkFont(family=FONT, size=19, weight="bold"),
+                                  text_color=TEXT, anchor="w")
+        title_info.grid(row=0, column=0, padx=26, pady=(26, 10), sticky="w")
 
-        instr_text = (
-            "1. Check Wi-Fi Connection:\n"
-            "   Ensure both this computer and your mobile device are on the exact\n"
-            "   same Wi-Fi network or personal hotspot.\n\n"
-            "2. Instant Camera Scanning:\n"
-            "   Open your phone camera app and point it at the QR Code on the left.\n"
-            "   Tap the browser pop-up link that appears to launch the sync portal.\n\n"
-            "3. No App Installation Required:\n"
-            "   Everything operates in real time over local network WebSockets!"
+        steps = (
+            "1. Same network\n"
+            "   Keep this computer and your phone on the same Wi-Fi or hotspot.\n\n"
+            "2. Scan the QR code\n"
+            "   Point your camera at the code on the left and open the link that appears.\n\n"
+            "3. Sync in real time\n"
+            "   Everything runs over your local network — no accounts, no cloud."
         )
-        instr_label = ctk.CTkLabel(
-            details_card,
-            text=instr_text,
-            font=ctk.CTkFont(size=14),
-            text_color="#CCCCCC",
-            justify="left",
-            anchor="w"
-        )
-        instr_label.grid(row=1, column=0, padx=28, pady=(0, 20), sticky="w")
+        instr = ctk.CTkLabel(details, text=steps, font=ctk.CTkFont(family=FONT, size=13),
+                             text_color=TEXT_SECONDARY, justify="left", anchor="w")
+        instr.grid(row=1, column=0, padx=26, pady=(0, 18), sticky="w")
 
-        # LAN URL Copy section
-        url_frame = ctk.CTkFrame(details_card, fg_color="#14141D", corner_radius=12)
-        url_frame.grid(row=2, column=0, padx=28, pady=(0, 24), sticky="ew")
+        url_frame = ctk.CTkFrame(details, fg_color=SURFACE_RAISED, corner_radius=RADIUS_SM)
+        url_frame.grid(row=2, column=0, padx=26, pady=(0, 18), sticky="ew")
         url_frame.grid_columnconfigure(0, weight=1)
 
-        self.url_disp_label = ctk.CTkLabel(
-            url_frame,
-            text=f"LAN Portal Address:  {self.mobile_url}",
-            font=ctk.CTkFont(size=14, weight="bold"),
-            text_color="#00E5FF",
-            anchor="w"
-        )
-        self.url_disp_label.grid(row=0, column=0, padx=16, pady=16, sticky="w")
+        self.url_disp_label = ctk.CTkLabel(url_frame, text=self.mobile_url,
+                                           font=ctk.CTkFont(family=MONO, size=13, weight="bold"),
+                                           text_color=PRIMARY, anchor="w")
+        self.url_disp_label.grid(row=0, column=0, padx=16, pady=14, sticky="w")
 
-        btn_copy_url = ctk.CTkButton(
-            url_frame,
-            text="📋 Copy Link",
-            width=110,
-            fg_color="#3949AB",
-            hover_color="#303F9F",
-            command=self.copy_mobile_url
-        )
-        btn_copy_url.grid(row=0, column=1, padx=16, pady=16)
+        btn_copy_url = ctk.CTkButton(url_frame, text="Copy link", width=100, height=32,
+                                     corner_radius=RADIUS_SM, fg_color=PRIMARY_STRONG,
+                                     hover_color="#5159E0", text_color=ON_ACCENT,
+                                     font=ctk.CTkFont(family=FONT, size=12, weight="bold"),
+                                     command=self.copy_mobile_url)
+        btn_copy_url.grid(row=0, column=1, padx=16, pady=12)
 
-        btn_open_browser = ctk.CTkButton(
-            details_card,
-            text="🌐 Open Web Portal on PC",
-            font=ctk.CTkFont(size=14, weight="bold"),
-            height=40,
-            fg_color="#26A69A",
-            hover_color="#00897B",
-            command=lambda: webbrowser.open(self.mobile_url)
-        )
-        btn_open_browser.grid(row=3, column=0, padx=28, pady=(0, 16), sticky="w")
+        btn_open = ctk.CTkButton(details, text="Open portal on this PC", height=38,
+                                 corner_radius=RADIUS_SM, fg_color=SURFACE_RAISED,
+                                 hover_color=HOVER, text_color=TEXT,
+                                 font=ctk.CTkFont(family=FONT, size=13, weight="bold"),
+                                 command=lambda: webbrowser.open(self.mobile_url))
+        btn_open.grid(row=3, column=0, padx=26, pady=(0, 12), sticky="w")
 
-        # Action toolbar for sending images or files from desktop
-        btn_box = ctk.CTkFrame(details_card, fg_color="transparent")
-        btn_box.grid(row=4, column=0, padx=28, pady=(0, 16), sticky="w")
+        btn_box = ctk.CTkFrame(details, fg_color="transparent")
+        btn_box.grid(row=4, column=0, padx=26, pady=(0, 14), sticky="w")
 
-        btn_send_img = ctk.CTkButton(
-            btn_box,
-            text="📷 Send Image",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            height=34,
-            fg_color="#7B1FA2",
-            hover_color="#6A1B9A",
-            command=self.send_image_file
-        )
+        btn_send_img = ctk.CTkButton(btn_box, text="Send image", image=_make_icon("image", ON_ACCENT, 15),
+                                     font=ctk.CTkFont(family=FONT, size=13, weight="bold"),
+                                     height=34, corner_radius=RADIUS_SM, fg_color=PRIMARY_STRONG,
+                                     hover_color="#5159E0", text_color=ON_ACCENT,
+                                     command=self.send_image_file)
         btn_send_img.grid(row=0, column=0, padx=(0, 12))
 
-        btn_send_file = ctk.CTkButton(
-            btn_box,
-            text="📁 Send File",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            height=34,
-            fg_color="#1565C0",
-            hover_color="#0D47A1",
-            command=self.send_any_file
-        )
+        btn_send_file = ctk.CTkButton(btn_box, text="Send file", image=_make_icon("folder", TEXT, 15),
+                                      font=ctk.CTkFont(family=FONT, size=13, weight="bold"),
+                                      height=34, corner_radius=RADIUS_SM, fg_color=SURFACE_RAISED,
+                                      hover_color=HOVER, text_color=TEXT,
+                                      command=self.send_any_file)
         btn_send_file.grid(row=0, column=1)
 
-        # Live connected peer indicator
-        self.conn_count_label = ctk.CTkLabel(
-            details_card,
-            text="📡 Active Connected Devices: 0",
-            font=ctk.CTkFont(size=15, weight="bold"),
-            text_color="#A5D6A7",
-            anchor="w"
-        )
-        self.conn_count_label.grid(row=5, column=0, padx=28, pady=(12, 24), sticky="w")
+        self.conn_count_label = ctk.CTkLabel(details, text="0 devices connected",
+                                             font=ctk.CTkFont(family=FONT, size=14, weight="bold"),
+                                             text_color=SUCCESS, anchor="w")
+        self.conn_count_label.grid(row=5, column=0, padx=26, pady=(8, 22), sticky="w")
 
         return frame
 
     def _generate_qr_image(self, data: str) -> None:
-        """Render high-contrast QR Code directly onto a CustomTkinter canvas."""
+        """Render the pairing QR code onto a CustomTkinter label."""
         try:
             qr = qrcode.QRCode(version=1, box_size=8, border=2)
             qr.add_data(data)
             qr.make(fit=True)
-            pil_img = qr.make_image(fill_color="white", back_color="#1E1E2C").convert("RGB")
-            ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(240, 240))
+            pil_img = qr.make_image(fill_color="white", back_color=SURFACE).convert("RGB")
+            ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(212, 212))
             self.qr_label.configure(image=ctk_img)
-            self.qr_label.image = ctk_img  # Prevent GC garbage disposal
+            self.qr_label.image = ctk_img
         except Exception as exc:
             self.qr_label.configure(text=f"[QR Error: {exc}]", image=None)
 
-    # --- TAB 2: LOG CONSOLE ---
-    def _build_tab_logs(self) -> ctk.CTkFrame:
+    # ------------------------------------------------------------------
+    # Settings tab (bridge control + activity log + help)
+    # ------------------------------------------------------------------
+    def _build_tab_settings(self) -> ctk.CTkFrame:
         frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
         frame.grid_columnconfigure(0, weight=1)
-        frame.grid_rowconfigure(1, weight=1)
+        frame.grid_rowconfigure(2, weight=1)
 
-        # Header Control bar
-        ctrl_bar = ctk.CTkFrame(frame, fg_color="transparent")
-        ctrl_bar.grid(row=0, column=0, sticky="ew", pady=(0, 12))
-        ctrl_bar.grid_columnconfigure(0, weight=1)
+        # Bridge control
+        sec1 = ctk.CTkFrame(frame, fg_color=SURFACE, corner_radius=RADIUS_CARD)
+        sec1.grid(row=0, column=0, sticky="ew", pady=(0, 16))
+        sec1.grid_columnconfigure(0, weight=1)
 
-        title = ctk.CTkLabel(
-            ctrl_bar,
-            text="Live Synchronization Diagnostic Feed",
-            font=ctk.CTkFont(size=18, weight="bold"),
-            anchor="w"
-        )
-        title.grid(row=0, column=0, sticky="w")
+        t1 = ctk.CTkLabel(sec1, text="Bridge", font=ctk.CTkFont(family=FONT, size=16, weight="bold"),
+                          text_color=TEXT, anchor="w")
+        t1.grid(row=0, column=0, padx=20, pady=(16, 4), sticky="w")
 
-        chk_scroll = ctk.CTkCheckBox(
-            ctrl_bar,
-            text="Auto-Scroll Feed",
-            variable=self.auto_scroll_logs,
-            text_color="#CCCCCC"
-        )
-        chk_scroll.grid(row=0, column=1, padx=16)
+        d1 = ctk.CTkLabel(sec1, text="Start or stop the local sync server. Both devices must be on the "
+                                     "same Wi-Fi network to pair.",
+                          font=ctk.CTkFont(family=FONT, size=13), text_color=TEXT_SECONDARY,
+                          justify="left", anchor="w", wraplength=680)
+        d1.grid(row=1, column=0, padx=20, pady=(0, 12), sticky="w")
 
-        btn_clear = ctk.CTkButton(
-            ctrl_bar,
-            text="🗑 Clear Console",
-            width=130,
-            fg_color="#37474F",
-            hover_color="#263238",
-            command=self.clear_logs
-        )
+        row = ctk.CTkFrame(sec1, fg_color="transparent")
+        row.grid(row=2, column=0, padx=20, pady=(0, 18), sticky="w")
+        self.settings_toggle_btn = ctk.CTkButton(row, text="Start bridge",
+                                                 font=ctk.CTkFont(family=FONT, size=13, weight="bold"),
+                                                 height=36, corner_radius=RADIUS_SM, fg_color=PRIMARY,
+                                                 hover_color=PRIMARY_STRONG, text_color=ON_ACCENT,
+                                                 command=self.toggle_engine)
+        self.settings_toggle_btn.grid(row=0, column=0, padx=(0, 14))
+        self.settings_status_lbl = ctk.CTkLabel(row, text="Status: Offline",
+                                                font=ctk.CTkFont(family=MONO, size=12),
+                                                text_color=TEXT_FAINT, anchor="w")
+        self.settings_status_lbl.grid(row=0, column=1, sticky="w")
+
+        # Activity log
+        sec2 = ctk.CTkFrame(frame, fg_color=SURFACE, corner_radius=RADIUS_CARD)
+        sec2.grid(row=1, column=0, sticky="ew", pady=(0, 16))
+        sec2.grid_columnconfigure(0, weight=1)
+
+        log_head = ctk.CTkFrame(sec2, fg_color="transparent")
+        log_head.grid(row=0, column=0, padx=20, pady=(16, 6), sticky="ew")
+        log_head.grid_columnconfigure(0, weight=1)
+
+        t2 = ctk.CTkLabel(log_head, text="Activity log", font=ctk.CTkFont(family=FONT, size=16, weight="bold"),
+                          text_color=TEXT, anchor="w")
+        t2.grid(row=0, column=0, sticky="w")
+
+        chk_scroll = ctk.CTkCheckBox(log_head, text="Auto-scroll", variable=self.auto_scroll_logs,
+                                     text_color=TEXT_SECONDARY, fg_color=PRIMARY_STRONG,
+                                     hover_color=PRIMARY_STRONG, font=ctk.CTkFont(family=FONT, size=12))
+        chk_scroll.grid(row=0, column=1, padx=12)
+
+        btn_clear = ctk.CTkButton(log_head, text="Clear", width=70, height=30, corner_radius=RADIUS_SM,
+                                  fg_color=SURFACE_RAISED, hover_color=HOVER, text_color=TEXT_SECONDARY,
+                                  font=ctk.CTkFont(family=FONT, size=12), command=self.clear_logs)
         btn_clear.grid(row=0, column=2)
 
-        # Log Text Box
         self.log_textbox = ctk.CTkTextbox(
-            frame,
-            font=ctk.CTkFont(family="Consolas", size=13),
-            fg_color="#0B0B11",
-            text_color="#00FF66",
-            corner_radius=12,
-            wrap="word"
+            sec2, height=170, corner_radius=RADIUS_SM, fg_color=BG, text_color=TEXT,
+            font=ctk.CTkFont(family=MONO, size=12), border_color=BORDER, border_width=1,
+            wrap="word",
         )
-        self.log_textbox.grid(row=1, column=0, sticky="nsew")
-        self.log_textbox.insert("0.0", "=== ClipBoardSync Application Engine Initialized ===\n")
+        self.log_textbox.grid(row=1, column=0, padx=20, pady=(4, 20), sticky="ew")
+        self.log_textbox.insert("0.0", "=== ClipBoardSync engine initialized ===\n")
         self.log_textbox.configure(state="disabled")
+
+        # Help
+        sec3 = ctk.CTkFrame(frame, fg_color=SURFACE, corner_radius=RADIUS_CARD)
+        sec3.grid(row=2, column=0, sticky="nsew", pady=(0, 0))
+        sec3.grid_columnconfigure(0, weight=1)
+
+        t3 = ctk.CTkLabel(sec3, text="Help & FAQ", font=ctk.CTkFont(family=FONT, size=16, weight="bold"),
+                          text_color=TEXT, anchor="w")
+        t3.grid(row=0, column=0, padx=20, pady=(16, 6), sticky="w")
+
+        guide = (
+            "How it works — ClipBoardSync runs a local WebSocket server on your PC. Scanning the QR code opens a "
+            "live portal on your phone; text, images and files move across your Wi-Fi network only.\n\n"
+            "Phone can't load the page? Make sure both devices are on the exact same network and that Windows "
+            "Firewall allows ClipBoardSync on private networks (port 8000).\n\n"
+            "Does it sync both ways? Yes — copying on the PC appears on the phone, and copying from the phone "
+            "portal loads straight into your Windows clipboard (Ctrl+V).\n\n"
+            "Offline use? Yes — everything stays on your local router, so it works even without internet."
+        )
+        body = ctk.CTkLabel(sec3, text=guide, font=ctk.CTkFont(family=FONT, size=13),
+                            text_color=TEXT_SECONDARY, justify="left", anchor="w", wraplength=760)
+        body.grid(row=1, column=0, padx=20, pady=(0, 22), sticky="w")
+
         return frame
 
-    # --- TAB 3: RECENT SYNC HISTORY ---
-    def _build_tab_history(self) -> ctk.CTkFrame:
-        frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
-        frame.grid_columnconfigure(0, weight=1)
-        frame.grid_rowconfigure(1, weight=1)
+    # ------------------------------------------------------------------
+    # Clipboard helpers
+    # ------------------------------------------------------------------
+    def copy_mobile_url(self) -> None:
+        self.clipboard_clear()
+        self.clipboard_append(self.mobile_url)
+        self.update()
+        self.log_queue.put(f"[ACTION] Copied mobile pairing URL to desktop clipboard: {self.mobile_url}")
 
-        # Header bar
-        header = ctk.CTkFrame(frame, fg_color="transparent")
-        header.grid(row=0, column=0, sticky="ew", pady=(0, 12))
-        header.grid_columnconfigure(0, weight=1)
-
-        title = ctk.CTkLabel(
-            header,
-            text="Recent Synced Clipboard Items",
-            font=ctk.CTkFont(size=18, weight="bold"),
-            anchor="w"
-        )
-        title.grid(row=0, column=0, sticky="w")
-
-        self.btn_refresh_hist = ctk.CTkButton(
-            header,
-            text="🔄 Refresh List",
-            width=120,
-            fg_color="#3949AB",
-            hover_color="#303F9F",
-            command=self._refresh_history_view
-        )
-        self.btn_refresh_hist.grid(row=0, column=1)
-
-        # Scrollable History Feed
-        self.history_scroll = ctk.CTkScrollableFrame(frame, fg_color="#181824", corner_radius=12)
-        self.history_scroll.grid(row=1, column=0, sticky="nsew")
-        self.history_scroll.grid_columnconfigure(0, weight=1)
-
-        self.history_empty_label = ctk.CTkLabel(
-            self.history_scroll,
-            text="No clipboard items synchronized yet.\nCopy some text on any connected device to see it appear here instantly!",
-            font=ctk.CTkFont(size=15),
-            text_color="#7B7E98"
-        )
-        self.history_empty_label.grid(row=0, column=0, pady=60)
-        return frame
-
-    def _refresh_history_view(self) -> None:
-        """Render recent clipboard items as aesthetic cards."""
-        for child in self.history_scroll.winfo_children():
-            child.destroy()
-
-        items = sync_hub.get_history()
-        if not items:
-            self.history_empty_label = ctk.CTkLabel(
-                self.history_scroll,
-                text="No clipboard items synchronized yet.\nCopy text, screenshots, or files on any connected device!",
-                font=ctk.CTkFont(size=15),
-                text_color="#7B7E98"
-            )
-            self.history_empty_label.grid(row=0, column=0, pady=60)
-            return
-
-        for idx, item in enumerate(reversed(items)):
-            card = ctk.CTkFrame(self.history_scroll, fg_color="#232334", corner_radius=10)
-            card.grid(row=idx, column=0, sticky="ew", padx=12, pady=8)
-            card.grid_columnconfigure(0, weight=1)
-
-            dev_id = item.get("device_id", "Unknown Device")
-            t_str = item.get("timestamp", "")
-            if t_str and "T" in t_str:
-                t_str = t_str.split("T")[1][:8]
-
-            item_type = item.get("type", "text")
-            type_icon = "📷 Image" if item_type == "image" else ("📁 File" if item_type == "file" else "📝 Text")
-            title_str = f" From: {dev_id}  |  [{type_icon}]  |  ⏰ {t_str}"
-            top_lbl = ctk.CTkLabel(card, text=title_str, font=ctk.CTkFont(size=12, weight="bold"), text_color="#00E5FF", anchor="w")
-            top_lbl.grid(row=0, column=0, padx=16, pady=(12, 4), sticky="w")
-
-            content_text = str(item.get("content", ""))
-            file_url = item.get("file_url")
-
-            if item_type == "image":
-                # Render Image thumbnail if base64 URI
-                try:
-                    if content_text.startswith("data:image/"):
-                        b64_part = content_text.split(",", 1)[1]
-                        raw_img = base64.b64decode(b64_part)
-                        pil_img = Image.open(io.BytesIO(raw_img))
-                        pil_img.thumbnail((200, 130))
-                        ctk_thumb = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=pil_img.size)
-                        img_lbl = ctk.CTkLabel(card, image=ctk_thumb, text="")
-                        img_lbl.grid(row=1, column=0, padx=16, pady=(4, 12), sticky="w")
-                    elif file_url:
-                        lbl_file = ctk.CTkLabel(card, text=f"📷 Image File: {item.get('filename', 'Image')}", font=ctk.CTkFont(size=14, weight="bold"), text_color="#EEEEEE")
-                        lbl_file.grid(row=1, column=0, padx=16, pady=(4, 12), sticky="w")
-                except Exception:
-                    lbl_file = ctk.CTkLabel(card, text="📷 [Image Data]", font=ctk.CTkFont(size=14), text_color="#EEEEEE")
-                    lbl_file.grid(row=1, column=0, padx=16, pady=(4, 12), sticky="w")
-
-                btn_copy = ctk.CTkButton(
-                    card,
-                    text="📋 Copy Image",
-                    width=130,
-                    height=32,
-                    fg_color="#7B1FA2",
-                    hover_color="#6A1B9A",
-                    command=lambda c=content_text: self.copy_image_to_local(c)
-                )
-                btn_copy.grid(row=0, column=1, rowspan=2, padx=16, pady=12)
-
-            elif item_type == "file":
-                fname = item.get("filename", "File")
-                fsize = item.get("filesize", 0)
-                fsize_str = f"{fsize / 1024:.1f} KB" if fsize < 1024 * 1024 else f"{fsize / (1024*1024):.1f} MB"
-                file_info = f"📁 {fname} ({fsize_str})"
-
-                lbl_file = ctk.CTkLabel(card, text=file_info, font=ctk.CTkFont(size=14, weight="bold"), text_color="#81D4FA", anchor="w")
-                lbl_file.grid(row=1, column=0, padx=16, pady=(4, 12), sticky="w")
-
-                if file_url:
-                    full_file_url = f"{self.mobile_url}{file_url}" if not file_url.startswith("http") else file_url
-                    btn_open = ctk.CTkButton(
-                        card,
-                        text="🌐 Download File",
-                        width=130,
-                        height=32,
-                        fg_color="#1565C0",
-                        hover_color="#0D47A1",
-                        command=lambda u=full_file_url: webbrowser.open(u)
-                    )
-                    btn_open.grid(row=0, column=1, rowspan=2, padx=16, pady=12)
-
-            else:
-                preview = content_text if len(content_text) <= 150 else content_text[:150] + "..."
-                txt_lbl = ctk.CTkLabel(card, text=preview, font=ctk.CTkFont(size=14), text_color="#EEEEEE", justify="left", anchor="w", wraplength=560)
-                txt_lbl.grid(row=1, column=0, padx=16, pady=(0, 12), sticky="w")
-
-                btn_copy = ctk.CTkButton(
-                    card,
-                    text="📋 Copy Text",
-                    width=130,
-                    height=32,
-                    fg_color="#00897B",
-                    hover_color="#00695C",
-                    command=lambda c=content_text: self.copy_clip_to_local(c)
-                )
-                btn_copy.grid(row=0, column=1, rowspan=2, padx=16, pady=12)
-
-    def send_image_file(self) -> None:
-        """Pick an image file from disk and broadcast across local Wi-Fi bridge."""
-        filepath = filedialog.askopenfilename(
-            title="Select Image to Send",
-            filetypes=[("Images", "*.png;*.jpg;*.jpeg;*.gif;*.webp"), ("All Files", "*.*")]
-        )
-        if not filepath:
-            return
-        try:
-            path = Path(filepath)
-            raw = path.read_bytes()
-            ext = path.suffix.lower().replace(".", "")
-            if ext == "jpg":
-                ext = "jpeg"
-            b64_str = base64.b64encode(raw).decode("utf-8")
-            data_uri = f"data:image/{ext};base64,{b64_str}"
-
-            # Write to local Windows clipboard
-            self.copy_image_to_local(data_uri)
-
-            # Broadcast via sync_hub
-            from server.models import ClipboardItem, get_utc_now_iso
-            item = ClipboardItem(
-                device_id="Desktop-GUI",
-                timestamp=get_utc_now_iso(),
-                type="image",
-                content=data_uri,
-                filename=path.name,
-                filesize=len(raw)
-            )
-            if self.engine._loop and self.engine._loop.is_running():
-                asyncio.run_coroutine_threadsafe(
-                    sync_hub.handle_message(None, item.to_message_dict()),
-                    self.engine._loop
-                )
-            self.log_queue.put(f"[ACTION] Sent image '{path.name}' ({len(raw)} bytes) across LAN bridge.")
-            self._refresh_history_view()
-        except Exception as exc:
-            self.log_queue.put(f"[ERROR] Failed to send image file: {exc}")
-
-    def send_any_file(self) -> None:
-        """Pick any file from disk, upload to server, and broadcast across local Wi-Fi bridge."""
-        filepath = filedialog.askopenfilename(title="Select File to Send")
-        if not filepath:
-            return
-        try:
-            path = Path(filepath)
-            import shutil
-            import uuid
-            from server.main import UPLOADS_DIR
-            safe_name = f"{uuid.uuid4().hex[:10]}{path.suffix}"
-            dest = UPLOADS_DIR / safe_name
-            shutil.copy2(path, dest)
-
-            file_url = f"/uploads/{safe_name}"
-            from server.models import ClipboardItem, get_utc_now_iso
-            item = ClipboardItem(
-                device_id="Desktop-GUI",
-                timestamp=get_utc_now_iso(),
-                type="file",
-                content=f"File: {path.name}",
-                filename=path.name,
-                filesize=path.stat().st_size,
-                file_url=file_url
-            )
-            if self.engine._loop and self.engine._loop.is_running():
-                asyncio.run_coroutine_threadsafe(
-                    sync_hub.handle_message(None, item.to_message_dict()),
-                    self.engine._loop
-                )
-            self.log_queue.put(f"[ACTION] Sent file '{path.name}' ({path.stat().st_size} bytes) across LAN bridge.")
-            self._refresh_history_view()
-        except Exception as exc:
-            self.log_queue.put(f"[ERROR] Failed to send file: {exc}")
+    def copy_clip_to_local(self, text: str) -> None:
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self.update()
+        self.log_queue.put(f"[ACTION] Copied history item ({len(text)} chars) to Windows clipboard.")
 
     def copy_image_to_local(self, data_uri: str) -> None:
-        """Write base64 image data to Windows clipboard."""
+        """Write base64 image data to the Windows clipboard as DIB."""
         try:
-            if "," in data_uri:
-                b64_str = data_uri.split(",", 1)[1]
-            else:
-                b64_str = data_uri
+            b64_str = data_uri.split(",", 1)[1] if "," in data_uri else data_uri
             raw = base64.b64decode(b64_str)
             img = Image.open(io.BytesIO(raw)).convert("RGB")
             buf = io.BytesIO()
@@ -749,63 +951,82 @@ class ClipBoardSyncGUI(ctk.CTk):
         except Exception as exc:
             self.log_queue.put(f"[ERROR] Failed to set image to Windows clipboard: {exc}")
 
-    def copy_clip_to_local(self, text: str) -> None:
-        self.clipboard_clear()
-        self.clipboard_append(text)
-        self.update()
-        self.log_queue.put(f"[ACTION] Copied history item ({len(text)} chars) to Windows Desktop clipboard.")
-
-    # --- TAB 4: USER GUIDE ---
-    def _build_tab_guide(self) -> ctk.CTkFrame:
-        frame = ctk.CTkFrame(self.main_container, fg_color="#181824", corner_radius=16)
-        frame.grid_columnconfigure(0, weight=1)
-
-        title = ctk.CTkLabel(
-            frame,
-            text="ClipBoardSync User Guide & FAQ",
-            font=ctk.CTkFont(size=22, weight="bold"),
-            anchor="w"
+    def send_image_file(self) -> None:
+        """Pick an image file from disk and broadcast across the local Wi-Fi bridge."""
+        filepath = filedialog.askopenfilename(
+            title="Select Image to Send",
+            filetypes=[("Images", "*.png;*.jpg;*.jpeg;*.gif;*.webp"), ("All Files", "*.*")]
         )
-        title.grid(row=0, column=0, padx=32, pady=(28, 16), sticky="w")
+        if not filepath:
+            return
+        try:
+            path = Path(filepath)
+            raw = path.read_bytes()
+            ext = path.suffix.lower().replace(".", "")
+            if ext == "jpg":
+                ext = "jpeg"
+            b64_str = base64.b64encode(raw).decode("utf-8")
+            data_uri = f"data:image/{ext};base64,{b64_str}"
 
-        guide_text = (
-            "Welcome to ClipBoardSync! Here is everything you need to know:\n\n"
-            "1. How Does This Work?\n"
-            "   ClipBoardSync establishes a secure local WebSocket server on your Windows PC.\n"
-            "   When you open the web portal on your smartphone (via QR code), both devices communicate\n"
-            "   directly across your home Wi-Fi network. No external cloud servers are involved!\n\n"
-            "2. Why Won't My Smartphone Load the Web Page?\n"
-            "   - Check that your PC and smartphone are connected to the EXACT same Wi-Fi router.\n"
-            "   - If your PC has Windows Firewall enabled, it might block inbound port 8000 connections.\n"
-            "     Allow Python or ClipBoardSync when Windows prompts for local network access.\n\n"
-            "3. Does My Clipboard Sync Both Ways?\n"
-            "   Yes! Copying text on your Windows laptop will immediately populate on your phone dashboard,\n"
-            "   and copying text from your phone dashboard will instantly load into your Windows clipboard!\n\n"
-            "4. Public & Offline Use:\n"
-            "   Because ClipBoardSync runs entirely locally, it works smoothly even on offline wireless routers\n"
-            "   and portable mobile hotspots!"
-        )
-        body = ctk.CTkLabel(
-            frame,
-            text=guide_text,
-            font=ctk.CTkFont(size=14),
-            text_color="#CCCCCC",
-            justify="left",
-            anchor="w"
-        )
-        body.grid(row=1, column=0, padx=32, pady=(0, 24), sticky="w")
-        return frame
+            self.copy_image_to_local(data_uri)
 
-    # --- ENGINE & AUTOMATION LOOPS ---
+            from server.models import ClipboardItem, get_utc_now_iso
+            item = ClipboardItem(
+                device_id="Desktop-GUI",
+                timestamp=get_utc_now_iso(),
+                type="image",
+                content=data_uri,
+                filename=path.name,
+                filesize=len(raw),
+            )
+            self._broadcast_item(item.to_message_dict())
+            self.log_queue.put(f"[ACTION] Sent image '{path.name}' ({len(raw)} bytes) across the LAN bridge.")
+            self._refresh_active_list()
+        except Exception as exc:
+            self.log_queue.put(f"[ERROR] Failed to send image file: {exc}")
+
+    def send_any_file(self) -> None:
+        """Pick any file, upload it to the server, and broadcast across the bridge."""
+        filepath = filedialog.askopenfilename(title="Select File to Send")
+        if not filepath:
+            return
+        try:
+            import shutil
+            import uuid
+            from server.main import UPLOADS_DIR
+            safe_name = f"{uuid.uuid4().hex[:10]}{Path(filepath).suffix}"
+            dest = UPLOADS_DIR / safe_name
+            shutil.copy2(filepath, dest)
+
+            from server.models import ClipboardItem, get_utc_now_iso
+            item = ClipboardItem(
+                device_id="Desktop-GUI",
+                timestamp=get_utc_now_iso(),
+                type="file",
+                content=f"File: {Path(filepath).name}",
+                filename=Path(filepath).name,
+                filesize=Path(filepath).stat().st_size,
+                file_url=f"/uploads/{safe_name}",
+            )
+            self._broadcast_item(item.to_message_dict())
+            self.log_queue.put(f"[ACTION] Sent file '{Path(filepath).name}' across the LAN bridge.")
+            self._refresh_active_list()
+        except Exception as exc:
+            self.log_queue.put(f"[ERROR] Failed to send file: {exc}")
+
+    def _broadcast_item(self, message: dict[str, Any]) -> None:
+        if self.engine._loop and self.engine._loop.is_running():
+            asyncio.run_coroutine_threadsafe(sync_hub.handle_message(None, message), self.engine._loop)
+
+    # ------------------------------------------------------------------
+    # Automation loops
+    # ------------------------------------------------------------------
     def _start_automation(self) -> None:
-        """Start non-blocking UI background checks and auto-boot synchronization engine."""
         self.after(100, self._process_log_queue)
         self.after(2000, self._poll_hub_status)
-        # Proactively start synchronization bridge upon launch
         self.toggle_engine()
 
     def _process_log_queue(self) -> None:
-        """Flush accumulated thread logs into the console display safely."""
         messages: list[str] = []
         try:
             while True:
@@ -824,16 +1045,34 @@ class ClipBoardSyncGUI(ctk.CTk):
         self.after(150, self._process_log_queue)
 
     def _poll_hub_status(self) -> None:
-        """Update connection counts and status indicators automatically."""
-        if self.engine.is_running:
-            cnt = sync_hub.connection_count
-            self.conn_count_label.configure(text=f"📡 Active Connected Devices: {cnt}")
-            self.status_badge.configure(text="  🟢 ONLINE (PORT 8000)  ", fg_color="#2E7D32")
-            self.toggle_engine_btn.configure(text="⏹ STOP BRIDGE", fg_color="#C62828", hover_color="#B71C1C")
+        running = self.engine.is_running
+        cnt = sync_hub.connection_count if running else 0
+
+        if running:
+            self.status_badge.configure(text="● ONLINE", text_color=SUCCESS)
+            self.settings_status_lbl.configure(text=f"Status: Online (port {self.port})", text_color=SUCCESS)
+            self.toggle_engine_btn.configure(text="STOP BRIDGE", fg_color=DANGER,
+                                             hover_color="#B23C3C", text_color=ON_ACCENT)
+            self.settings_toggle_btn.configure(text="Stop bridge", fg_color=DANGER,
+                                               hover_color="#B23C3C", text_color=ON_ACCENT)
+            self.conn_count_label.configure(text=f"{cnt} devices connected")
         else:
-            self.conn_count_label.configure(text="📡 Active Connected Devices: 0")
-            self.status_badge.configure(text="  🔴 OFFLINE  ", fg_color="#B71C1C")
-            self.toggle_engine_btn.configure(text="▶ START BRIDGE", fg_color="#00C853", hover_color="#00B248")
+            self.status_badge.configure(text="● OFFLINE", text_color=DANGER)
+            self.settings_status_lbl.configure(text="Status: Offline", text_color=TEXT_FAINT)
+            self.toggle_engine_btn.configure(text="START BRIDGE", fg_color=PRIMARY,
+                                             hover_color=PRIMARY_STRONG, text_color=ON_ACCENT)
+            self.settings_toggle_btn.configure(text="Start bridge", fg_color=PRIMARY,
+                                               hover_color=PRIMARY_STRONG, text_color=ON_ACCENT)
+            self.conn_count_label.configure(text="0 devices connected")
+
+        self.conn_label.configure(text=f"{cnt} devices connected")
+
+        if self._active_tab in ("clipboard", "pinned", "files"):
+            hist = sync_hub.get_history()
+            sig = tuple((i.get("id"), i.get("type"), str(i.get("content", ""))[:40], i.get("filename")) for i in hist)
+            if sig != self._last_sig:
+                self._last_sig = sig
+                self._refresh_active_list()
 
         self.after(2000, self._poll_hub_status)
 
@@ -841,21 +1080,16 @@ class ClipBoardSyncGUI(ctk.CTk):
         """Start or stop the backend synchronization bridge."""
         if not self.engine.is_running:
             self.engine.start(self.log_queue)
-            self.status_badge.configure(text="  🟡 STARTING...  ", fg_color="#F57F17")
+            self.status_badge.configure(text="● STARTING", text_color=WARNING)
+            self.settings_status_lbl.configure(text="Status: Starting…", text_color=WARNING)
         else:
             self.engine.stop()
-            self.status_badge.configure(text="  🔴 OFFLINE  ", fg_color="#B71C1C")
-
-    def copy_mobile_url(self) -> None:
-        self.clipboard_clear()
-        self.clipboard_append(self.mobile_url)
-        self.update()
-        self.log_queue.put(f"[ACTION] Copied mobile pairing URL to desktop clipboard: {self.mobile_url}")
+            self.status_badge.configure(text="● OFFLINE", text_color=DANGER)
 
     def clear_logs(self) -> None:
         self.log_textbox.configure(state="normal")
         self.log_textbox.delete("0.0", "end")
-        self.log_textbox.insert("0.0", "=== Log Console Cleared ===\n")
+        self.log_textbox.insert("0.0", "=== Log console cleared ===\n")
         self.log_textbox.configure(state="disabled")
 
     def on_close_request(self) -> None:
@@ -865,3 +1099,25 @@ class ClipBoardSyncGUI(ctk.CTk):
         sys.stdout = self.original_stdout
         self.destroy()
         sys.exit(0)
+
+
+def _preview_text(text: str, limit: int = 280) -> str:
+    """Collapse whitespace and truncate long text for a clean list preview."""
+    s = " ".join(str(text).split())
+    return s if len(s) <= limit else s[:limit] + "…"
+
+
+def _format_time(iso_str: Any) -> str:
+    try:
+        dt = datetime.datetime.fromisoformat(str(iso_str))
+        return dt.strftime("%H:%M:%S")
+    except Exception:
+        return ""
+
+
+def _format_device(device_id: Any) -> str:
+    """Shorten a raw device identifier for display in list meta rows."""
+    s = str(device_id or "Unknown Device")
+    if len(s) > 14:
+        return f"{s[:14]}…"
+    return s

@@ -3,16 +3,14 @@
 
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ClipBoardSync — Local Clipboard Bridge</title>
     <meta name="description"
         content="Send text and links between your phone and computer instantly over your local Wi-Fi network. No cloud, no accounts.">
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link
-        href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
-        rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 
     <link rel="stylesheet" href="styles.css">
 </head>
@@ -115,6 +113,9 @@
                 </div>
                 <button id="clear-feed-btn" class="text-btn" title="Clear visible items">Clear</button>
             </div>
+
+            <input id="feed-search" class="feed-search" type="search" placeholder="Search clips (Ctrl+K)"
+                aria-label="Search clipboard history" autocomplete="off">
 
             <!-- Empty state -->
             <div id="empty-state" class="empty-state">
