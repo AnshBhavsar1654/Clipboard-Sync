@@ -23,6 +23,8 @@
   --warning: #FBBF24;
   --danger: #F87171;
 
+  color-scheme: dark;
+
   --font-display: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --font-mono: 'SFMono-Regular', 'Consolas', 'Liberation Mono', monospace;
 
@@ -30,11 +32,38 @@
   --radius-sm: 6px;
 }
 
+/* Light theme (DESIGN.md palette) */
+[data-theme="light"] {
+  --bg: #F7F8FA;
+  --surface: #FFFFFF;
+  --surface-raised: #EEF0F4;
+  --border: #E5E7EB;
+  --border-strong: #D1D5DB;
+
+  --ink: #111827;
+  --ink-soft: #6B7280;
+  --ink-faint: #9CA3AF;
+
+  --primary: #6366F1;
+  --primary-strong: #4F46E5;
+  --on-accent: #FFFFFF;
+
+  --positive: #059669;
+  --warning: #B45309;
+  --danger: #DC2626;
+
+  color-scheme: light;
+}
+
 * {
   box-sizing: border-box;
   margin: 0;
   padding: 0;
   -webkit-tap-highlight-color: transparent;
+}
+
+[hidden] {
+  display: none !important;
 }
 
 body {
@@ -101,6 +130,106 @@ body {
 /* Connection badge */
 .status-indicator {
   padding-top: 2px;
+}
+
+.header-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.theme-toggle {
+  position: static;
+  top: auto;
+  right: auto;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--ink-soft);
+}
+
+.theme-toggle:hover {
+  color: var(--ink);
+  border-color: var(--border-strong);
+}
+
+/* Pairing PIN screen */
+.auth-screen {
+  display: flex;
+  justify-content: center;
+}
+
+.auth-card {
+  width: 100%;
+  padding: 28px 22px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  text-align: center;
+}
+
+.auth-icon {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: var(--surface-raised);
+  border: 1px solid var(--border-strong);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--primary);
+  margin-bottom: 4px;
+}
+
+.auth-title {
+  font-size: 1.15rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.auth-body {
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+  max-width: 34ch;
+}
+
+.pin-input {
+  width: 100%;
+  max-width: 220px;
+  margin-top: 10px;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 1.6rem;
+  letter-spacing: 0.5em;
+  padding: 14px 10px 14px 20px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  caret-color: var(--primary);
+}
+
+.pin-input::placeholder {
+  color: var(--ink-faint);
+}
+
+.pin-input:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
+.pin-submit {
+  margin-top: 14px;
+  min-width: 180px;
+}
+
+.auth-error {
+  margin-top: 6px;
+  font-size: 0.8rem;
+  color: var(--danger);
+  font-weight: 500;
 }
 
 .badge {

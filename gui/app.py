@@ -32,34 +32,75 @@ import uvicorn
 
 from client.config import Config
 from client.main import ClipBoardSyncApp
+from server.auth import get_store
 from server.main import app as fastapi_app, hub as sync_hub
 
 # ---------------------------------------------------------------------------
-# Design tokens (DESIGN.md — dark palette)
+# Design tokens (DESIGN.md — dark & light palettes, switched at runtime)
 # ---------------------------------------------------------------------------
-BG = "#0D0F12"
-SURFACE = "#15181D"
-SURFACE_RAISED = "#1C2128"
-BORDER = "#292E36"
-HOVER = "#262B34"
-TEXT = "#F3F4F6"
-TEXT_SECONDARY = "#9CA3AF"
-TEXT_FAINT = "#6B7280"
-PRIMARY = "#818CF8"
-PRIMARY_STRONG = "#6366F1"
-SUCCESS = "#34D399"
-WARNING = "#FBBF24"
-DANGER = "#F87171"
-ON_ACCENT = "#0D0F12"
+DARK_THEME = {
+    "BG": "#0D0F12",
+    "SURFACE": "#15181D",
+    "SURFACE_RAISED": "#1C2128",
+    "BORDER": "#292E36",
+    "HOVER": "#262B34",
+    "TEXT": "#F3F4F6",
+    "TEXT_SECONDARY": "#9CA3AF",
+    "TEXT_FAINT": "#6B7280",
+    "PRIMARY": "#818CF8",
+    "PRIMARY_STRONG": "#6366F1",
+    "HOVER_PRIMARY": "#5159E0",
+    "DANGER_HOVER": "#B23C3C",
+    "SUCCESS": "#34D399",
+    "WARNING": "#FBBF24",
+    "DANGER": "#F87171",
+    "ON_ACCENT": "#0D0F12",
+}
+
+LIGHT_THEME = {
+    "BG": "#F7F8FA",
+    "SURFACE": "#FFFFFF",
+    "SURFACE_RAISED": "#EEF0F4",
+    "BORDER": "#E5E7EB",
+    "HOVER": "#E6E9EF",
+    "TEXT": "#111827",
+    "TEXT_SECONDARY": "#6B7280",
+    "TEXT_FAINT": "#9CA3AF",
+    "PRIMARY": "#6366F1",
+    "PRIMARY_STRONG": "#4F46E5",
+    "HOVER_PRIMARY": "#4F46E5",
+    "DANGER_HOVER": "#B91C1C",
+    "SUCCESS": "#059669",
+    "WARNING": "#B45309",
+    "DANGER": "#DC2626",
+    "ON_ACCENT": "#FFFFFF",
+}
+
+THEMES: dict[str, dict[str, str]] = {"dark": DARK_THEME, "light": LIGHT_THEME}
+
+# Module-level color tokens (active theme). Reassigned by _set_theme().
+globals().update(DARK_THEME)
+TYPE_COLORS = {"text": SUCCESS, "image": PRIMARY, "file": WARNING}
 
 RADIUS_SM = 6
 RADIUS_CARD = 10
 FONT = "Segoe UI"
 MONO = "Consolas"
 
-TYPE_COLORS = {"text": SUCCESS, "image": PRIMARY, "file": WARNING}
 
-ctk.set_appearance_mode("Dark")
+def _set_theme(name: str) -> None:
+    """Apply a theme palette to all module-level design tokens."""
+    tokens = THEMES[name]
+    globals().update(tokens)
+    globals()["TYPE_COLORS"] = {
+        "text": tokens["SUCCESS"],
+        "image": tokens["PRIMARY"],
+        "file": tokens["WARNING"],
+    }
+    ctk.set_appearance_mode(name)
+
+
+_set_theme("dark")
 ctk.set_default_color_theme("blue")
 
 logger = logging.getLogger("clipboardsync.gui")
@@ -77,6 +118,15 @@ def get_local_lan_ip() -> str:
             return str(socket.gethostbyname(hostname))
         except Exception:
             return "127.0.0.1"
+
+
+def get_icon_path() -> Path:
+    """Resolve the application icon file (frozen bundle vs. source tree)."""
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        candidate = Path(sys._MEIPASS) / "assets" / "clipboardsync.ico"
+        if candidate.exists():
+            return candidate
+    return Path(__file__).resolve().parent.parent / "assets" / "clipboardsync.ico"
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +203,19 @@ def _d_image(d: ImageDraw.ImageDraw, c: str, s: int) -> None:
     d.line((2 * s, 12 * s, 7 * s, 8 * s, 10 * s, 11 * s, 12 * s, 9 * s, 14 * s, 11 * s), fill=c, width=s)
 
 
+def _d_sun(d: ImageDraw.ImageDraw, c: str, s: int) -> None:
+    d.ellipse((6 * s, 6 * s, 10 * s, 10 * s), outline=c, width=s)
+    for x1, y1, x2, y2 in (
+        (8, 2, 8, 4), (8, 12, 8, 14), (2, 8, 4, 8), (12, 8, 14, 8),
+        (4, 4, 5, 5), (11, 11, 12, 12), (4, 12, 5, 11), (11, 5, 12, 4),
+    ):
+        d.line((x1 * s, y1 * s, x2 * s, y2 * s), fill=c, width=s)
+
+
+def _d_moon(d: ImageDraw.ImageDraw, c: str, s: int) -> None:
+    d.pieslice((2 * s, 2 * s, 14 * s, 14 * s), start=35, end=325, fill=c, outline=c, width=s)
+
+
 _ICON_DRAWS = {
     "clipboard": _d_clipboard,
     "pin": _d_pin,
@@ -165,6 +228,8 @@ _ICON_DRAWS = {
     "download": _d_download,
     "doc": _d_doc,
     "image": _d_image,
+    "sun": _d_sun,
+    "moon": _d_moon,
 }
 
 
@@ -216,6 +281,85 @@ class StdoutRedirector:
     def flush(self) -> None:
         if self.original_stdout:
             self.original_stdout.flush()
+
+
+class Tooltip:
+    """Hover tooltip for icon-only CTk buttons.
+
+    Shows a small floating label while the mouse hovers the widget and hides
+    automatically once the pointer leaves the widget's bounds. Hiding is driven
+    by polling the pointer position rather than <Leave> events, because
+    CustomTkinter buttons render on an internal canvas whose event targeting
+    makes <Leave> unreliable.
+    """
+
+    def __init__(self, widget: ctk.CTkBaseClass, text: str) -> None:
+        self.widget = widget
+        self.text = text
+        self._tip_window: ctk.CTkToplevel | None = None
+        widget.bind("<Enter>", self._show, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+        widget.bind("<ButtonRelease>", self._hide, add="+")
+        canvas = getattr(widget, "_canvas", None)
+        if canvas is not None:
+            canvas.bind("<Enter>", self._show, add="+")
+
+    def _show(self, _event: Any = None) -> None:
+        if self._tip_window is not None:
+            return
+        try:
+            x = self.widget.winfo_rootx() + 8
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+            tip = ctk.CTkToplevel(self.widget)
+            tip.wm_overrideredirect(True)
+            tip.attributes("-topmost", True)
+            tip.wm_geometry(f"+{x}+{y}")
+            label = ctk.CTkLabel(
+                tip,
+                text=self.text,
+                font=ctk.CTkFont(family=FONT, size=11),
+                fg_color=SURFACE_RAISED,
+                text_color=TEXT,
+                corner_radius=RADIUS_SM,
+                border_width=1,
+                border_color=BORDER,
+                padx=8,
+                pady=4,
+            )
+            label.pack()
+            self._tip_window = tip
+            self._watch()
+        except Exception:
+            self._tip_window = None
+
+    def _watch(self) -> None:
+        if self._tip_window is None:
+            return
+        inside = False
+        try:
+            widget = self.widget
+            if widget.winfo_ismapped():
+                px = widget.winfo_pointerx()
+                py = widget.winfo_pointery()
+                rx = widget.winfo_rootx()
+                ry = widget.winfo_rooty()
+                ww = widget.winfo_width()
+                wh = widget.winfo_height()
+                inside = rx <= px <= rx + ww and ry <= py <= ry + wh
+        except Exception:
+            inside = False
+        if not inside:
+            self._hide()
+            return
+        self.widget.after(80, self._watch)
+
+    def _hide(self, _event: Any = None) -> None:
+        if self._tip_window is not None:
+            try:
+                self._tip_window.destroy()
+            except Exception:
+                pass
+            self._tip_window = None
 
 
 # ---------------------------------------------------------------------------
@@ -318,6 +462,14 @@ class ClipBoardSyncGUI(ctk.CTk):
         self.geometry("1020x680")
         self.minsize(880, 560)
 
+        # Window / taskbar icon (fall back gracefully when unavailable)
+        icon_file = get_icon_path()
+        if sys.platform == "win32" and icon_file.exists():
+            try:
+                self.iconbitmap(str(icon_file))
+            except Exception:
+                pass
+
         self.protocol("WM_DELETE_WINDOW", self.on_close_request)
 
         # Internal state & queues
@@ -331,6 +483,12 @@ class ClipBoardSyncGUI(ctk.CTk):
         self.search_var = ctk.StringVar(value="")
         self._pinned: dict[str, dict[str, Any]] = self._load_pins()
         self._last_sig: tuple[tuple[str, ...], ...] = ()
+        self.trust_store = get_store()
+        self._last_pairing_sig: tuple[Any, ...] | None = None
+        self._log_lines: list[str] = ["=== ClipBoardSync engine initialized ==="]
+
+        self.theme_name = self._load_theme_pref()
+        _set_theme(self.theme_name)
 
         # Connect log redirectors
         self.log_handler = QueueLogHandler(self.log_queue)
@@ -420,6 +578,21 @@ class ClipBoardSyncGUI(ctk.CTk):
         )
         self.toggle_engine_btn.grid(row=6, column=0, padx=16, pady=(0, 24), sticky="ew")
 
+        self.theme_btn = ctk.CTkButton(
+            self.sidebar,
+            text="Light theme" if self.theme_name == "dark" else "Dark theme",
+            image=_make_icon("sun" if self.theme_name == "dark" else "moon", TEXT_SECONDARY, 16),
+            anchor="w",
+            font=ctk.CTkFont(family=FONT, size=12),
+            height=32,
+            corner_radius=RADIUS_SM,
+            fg_color="transparent",
+            hover_color=HOVER,
+            text_color=TEXT_SECONDARY,
+            command=self._toggle_theme,
+        )
+        self.theme_btn.grid(row=7, column=0, padx=16, pady=(0, 18), sticky="ew")
+
         # --- Main container ---
         self.main_container = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)
         self.main_container.grid(row=0, column=1, sticky="nsew")
@@ -476,6 +649,7 @@ class ClipBoardSyncGUI(ctk.CTk):
 
     def _show_devices(self) -> None:
         self._select_nav(self.btn_devices, "devices", self.tab_devices)
+        self._refresh_pairing_view()
 
     def _show_settings(self) -> None:
         self._select_nav(self.btn_settings, "settings", self.tab_settings)
@@ -487,6 +661,69 @@ class ClipBoardSyncGUI(ctk.CTk):
                 self.search_entry.select_range(0, "end")
             except Exception:
                 pass
+
+    # ------------------------------------------------------------------
+    # Theme switching (rebuilds the UI so every widget uses fresh tokens)
+    # ------------------------------------------------------------------
+    def _load_theme_pref(self) -> str:
+        try:
+            p = Path.home() / ".clipboardsync" / "gui_prefs.json"
+            if p.exists():
+                saved = json.loads(p.read_text(encoding="utf-8")).get("theme", "dark")
+                if saved in THEMES:
+                    return saved
+        except Exception:
+            pass
+        return "dark"
+
+    def _save_theme_pref(self, name: str) -> None:
+        try:
+            p = Path.home() / ".clipboardsync" / "gui_prefs.json"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps({"theme": name}, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _toggle_theme(self) -> None:
+        active_tab = self._active_tab
+        new_name = "light" if self.theme_name == "dark" else "dark"
+        self.theme_name = new_name
+        self._save_theme_pref(new_name)
+        _set_theme(new_name)
+
+        # Capture the current log so it survives the widget rebuild
+        try:
+            if hasattr(self, "log_textbox"):
+                raw = self.log_textbox.get("0.0", "end").rstrip("\n")
+                self._log_lines = [ln for ln in raw.split("\n") if ln]
+        except Exception:
+            pass
+
+        self.sidebar.destroy()
+        self.main_container.destroy()
+        self._init_ui()
+
+        show_fn = {
+            "clipboard": self._show_clipboard,
+            "pinned": self._show_pinned,
+            "files": self._show_files,
+            "devices": self._show_devices,
+            "settings": self._show_settings,
+        }.get(active_tab, self._show_clipboard)
+        show_fn()
+        self._replay_log_lines()
+        self.log_queue.put(f"[ACTION] Switched to {'light' if new_name == 'light' else 'dark'} theme.")
+
+    def _replay_log_lines(self) -> None:
+        try:
+            self.log_textbox.configure(state="normal")
+            self.log_textbox.delete("0.0", "end")
+            for line in self._log_lines:
+                self.log_textbox.insert("end", line + "\n")
+            self.log_textbox.see("end")
+            self.log_textbox.configure(state="disabled")
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # List tabs (Clipboard / Pinned / Files)
@@ -654,6 +891,7 @@ class ClipBoardSyncGUI(ctk.CTk):
             fg_color="transparent", hover_color=HOVER,
             command=lambda iid=item_id, it=item: self._toggle_pin(iid, it))
         pin_btn.grid(row=0, column=0, pady=(0, 6))
+        Tooltip(pin_btn, "Unpin" if is_pinned else "Pin to top")
 
         if itype == "file":
             file_url = str(item.get("file_url") or "")
@@ -664,13 +902,36 @@ class ClipBoardSyncGUI(ctk.CTk):
                 image=_make_icon("download", TEXT_SECONDARY, 16),
                 fg_color="transparent", hover_color=HOVER,
                 command=lambda u=file_url: webbrowser.open(u) if u else None)
+            act_btn.grid(row=1, column=0)
+            Tooltip(act_btn, "Download file")
+        elif itype == "image":
+            if content.startswith("data:image/"):
+                act_btn = ctk.CTkButton(
+                    actions, width=30, height=30, corner_radius=RADIUS_SM, text="",
+                    image=_make_icon("copy", TEXT_SECONDARY, 16),
+                    fg_color="transparent", hover_color=HOVER,
+                    command=lambda c=content: self.copy_image_to_local(c))
+                act_btn.grid(row=1, column=0)
+                Tooltip(act_btn, "Copy image to clipboard")
+            else:
+                img_url = str(item.get("file_url") or item.get("content") or "")
+                if img_url and not img_url.startswith("http"):
+                    img_url = f"{self.mobile_url}{img_url}"
+                act_btn = ctk.CTkButton(
+                    actions, width=30, height=30, corner_radius=RADIUS_SM, text="",
+                    image=_make_icon("download", TEXT_SECONDARY, 16),
+                    fg_color="transparent", hover_color=HOVER,
+                    command=lambda u=img_url: webbrowser.open(u) if u else None)
+                act_btn.grid(row=1, column=0)
+                Tooltip(act_btn, "Download image")
         else:
             act_btn = ctk.CTkButton(
                 actions, width=30, height=30, corner_radius=RADIUS_SM, text="",
                 image=_make_icon("copy", TEXT_SECONDARY, 16),
                 fg_color="transparent", hover_color=HOVER,
-                command=lambda c=content, t=itype: (self.copy_clip_to_local(c) if t == "text" else self.copy_image_to_local(c)))
-        act_btn.grid(row=1, column=0)
+                command=lambda c=content: self.copy_clip_to_local(c))
+            act_btn.grid(row=1, column=0)
+            Tooltip(act_btn, "Copy to clipboard")
 
     def _render_image_body(self, content_col: ctk.CTkFrame, content: str, item: dict[str, Any]) -> None:
         """Render an image thumbnail when base64 data is embedded, else a text descriptor."""
@@ -723,9 +984,8 @@ class ClipBoardSyncGUI(ctk.CTk):
     # Devices tab (QR pairing)
     # ------------------------------------------------------------------
     def _build_tab_devices(self) -> ctk.CTkFrame:
-        frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
+        frame = ctk.CTkScrollableFrame(self.main_container, fg_color="transparent")
         frame.grid_columnconfigure(1, weight=1)
-        frame.grid_rowconfigure(0, weight=1)
 
         # QR card
         qr_card = ctk.CTkFrame(frame, fg_color=SURFACE, corner_radius=RADIUS_CARD)
@@ -775,7 +1035,7 @@ class ClipBoardSyncGUI(ctk.CTk):
 
         btn_copy_url = ctk.CTkButton(url_frame, text="Copy link", width=100, height=32,
                                      corner_radius=RADIUS_SM, fg_color=PRIMARY_STRONG,
-                                     hover_color="#5159E0", text_color=ON_ACCENT,
+                                     hover_color=HOVER_PRIMARY, text_color=ON_ACCENT,
                                      font=ctk.CTkFont(family=FONT, size=12, weight="bold"),
                                      command=self.copy_mobile_url)
         btn_copy_url.grid(row=0, column=1, padx=16, pady=12)
@@ -793,7 +1053,7 @@ class ClipBoardSyncGUI(ctk.CTk):
         btn_send_img = ctk.CTkButton(btn_box, text="Send image", image=_make_icon("image", ON_ACCENT, 15),
                                      font=ctk.CTkFont(family=FONT, size=13, weight="bold"),
                                      height=34, corner_radius=RADIUS_SM, fg_color=PRIMARY_STRONG,
-                                     hover_color="#5159E0", text_color=ON_ACCENT,
+                                     hover_color=HOVER_PRIMARY, text_color=ON_ACCENT,
                                      command=self.send_image_file)
         btn_send_img.grid(row=0, column=0, padx=(0, 12))
 
@@ -809,6 +1069,53 @@ class ClipBoardSyncGUI(ctk.CTk):
                                              text_color=SUCCESS, anchor="w")
         self.conn_count_label.grid(row=5, column=0, padx=26, pady=(8, 22), sticky="w")
 
+        # --- Pairing PIN + trusted devices card ---
+        trust_card = ctk.CTkFrame(frame, fg_color=SURFACE, corner_radius=RADIUS_CARD)
+        trust_card.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(20, 0))
+
+        t_head = ctk.CTkLabel(trust_card, text="Device pairing",
+                              font=ctk.CTkFont(family=FONT, size=16, weight="bold"),
+                              text_color=TEXT, anchor="w")
+        t_head.pack(anchor="w", padx=20, pady=(16, 4))
+
+        t_desc = ctk.CTkLabel(trust_card,
+                              text="New devices enter this PIN once and are remembered afterwards. "
+                                   "A phone that re-scans the QR code connects without being asked again.",
+                              font=ctk.CTkFont(family=FONT, size=13), text_color=TEXT_SECONDARY,
+                              justify="left", anchor="w", wraplength=860)
+        t_desc.pack(anchor="w", padx=20, pady=(0, 12))
+
+        pin_row = ctk.CTkFrame(trust_card, fg_color=SURFACE_RAISED, corner_radius=RADIUS_SM)
+        pin_row.pack(fill="x", padx=20, pady=(0, 10))
+        pin_row.grid_columnconfigure(0, weight=1)
+
+        self.pin_policy_lbl = ctk.CTkLabel(pin_row, text="PAIRING PIN", font=ctk.CTkFont(family=MONO, size=11, weight="bold"),
+                                           text_color=TEXT_FAINT, anchor="w")
+        self.pin_policy_lbl.grid(row=0, column=0, padx=18, pady=(10, 0), sticky="w")
+
+        pin_value_row = ctk.CTkFrame(pin_row, fg_color="transparent")
+        pin_value_row.grid(row=1, column=0, padx=18, pady=(0, 10), sticky="w")
+        self.pin_value_lbl = ctk.CTkLabel(pin_value_row, text="······",
+                                          font=ctk.CTkFont(family=MONO, size=26, weight="bold"),
+                                          text_color=PRIMARY, anchor="w")
+        self.pin_value_lbl.grid(row=0, column=0, sticky="w")
+
+        btn_regenerate = ctk.CTkButton(pin_row, text="Regenerate PIN", width=130, height=32,
+                                       corner_radius=RADIUS_SM, fg_color=SURFACE_RAISED,
+                                       hover_color=HOVER, text_color=TEXT,
+                                       font=ctk.CTkFont(family=FONT, size=12, weight="bold"),
+                                       command=self._regenerate_pin)
+        btn_regenerate.grid(row=0, column=1, rowspan=2, padx=18, pady=12)
+
+        trusted_lbl = ctk.CTkLabel(trust_card, text="Paired devices",
+                                   font=ctk.CTkFont(family=FONT, size=13, weight="bold"),
+                                   text_color=TEXT, anchor="w")
+        trusted_lbl.pack(anchor="w", padx=20, pady=(0, 6))
+
+        self.trusted_scroll = ctk.CTkScrollableFrame(trust_card, fg_color="transparent", height=116)
+        self.trusted_scroll.pack(fill="x", padx=20, pady=(0, 18))
+        self.trusted_scroll.grid_columnconfigure(0, weight=1)
+
         return frame
 
     def _generate_qr_image(self, data: str) -> None:
@@ -817,12 +1124,54 @@ class ClipBoardSyncGUI(ctk.CTk):
             qr = qrcode.QRCode(version=1, box_size=8, border=2)
             qr.add_data(data)
             qr.make(fit=True)
-            pil_img = qr.make_image(fill_color="white", back_color=SURFACE).convert("RGB")
+            qr_fg = "#111827" if self.theme_name == "light" else "white"
+            pil_img = qr.make_image(fill_color=qr_fg, back_color=SURFACE).convert("RGB")
             ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(212, 212))
             self.qr_label.configure(image=ctk_img)
             self.qr_label.image = ctk_img
         except Exception as exc:
             self.qr_label.configure(text=f"[QR Error: {exc}]", image=None)
+
+    def _refresh_pairing_view(self) -> None:
+        """Refresh the pairing PIN label and the list of trusted devices."""
+        if not hasattr(self, "pin_value_lbl"):
+            return
+        enabled = self.trust_store.require_pin
+        self.pin_value_lbl.configure(text=self.trust_store.pairing_pin if enabled else "— disabled —")
+        self.pin_policy_lbl.configure(text="PAIRING PIN" if enabled else "PAIRING PIN (DISABLED)")
+
+        for child in self.trusted_scroll.winfo_children():
+            child.destroy()
+
+        devices = self.trust_store.trusted_devices()
+        if not devices:
+            lbl = ctk.CTkLabel(self.trusted_scroll, text="No paired devices yet. Scan the QR code and enter the PIN once.",
+                               font=ctk.CTkFont(family=FONT, size=13), text_color=TEXT_FAINT, anchor="w")
+            lbl.grid(row=0, column=0, sticky="w", pady=4)
+            return
+
+        for i, dev in enumerate(devices):
+            row = ctk.CTkFrame(self.trusted_scroll, fg_color=SURFACE_RAISED, corner_radius=RADIUS_SM)
+            row.grid(row=i, column=0, sticky="ew", pady=3)
+            row.grid_columnconfigure(0, weight=1)
+            name_lbl = ctk.CTkLabel(row, text=_format_device(dev),
+                                    font=ctk.CTkFont(family=FONT, size=13), text_color=TEXT, anchor="w")
+            name_lbl.grid(row=0, column=0, padx=12, pady=6, sticky="w")
+            btn_rm = ctk.CTkButton(row, text="Remove", width=72, height=26, corner_radius=RADIUS_SM,
+                                   fg_color=SURFACE_RAISED, hover_color=DANGER, text_color=TEXT_SECONDARY,
+                                   font=ctk.CTkFont(family=FONT, size=11, weight="bold"),
+                                   command=lambda d=dev: self._remove_device(d))
+            btn_rm.grid(row=0, column=1, padx=8, pady=5)
+
+    def _regenerate_pin(self) -> None:
+        pin = self.trust_store.regenerate_pin()
+        self._refresh_pairing_view()
+        self.log_queue.put(f"[ACTION] Generated a new pairing PIN: {pin}")
+
+    def _remove_device(self, device_id: str) -> None:
+        self.trust_store.untrust(device_id)
+        self._refresh_pairing_view()
+        self.log_queue.put(f"[ACTION] Removed paired device '{device_id}'.")
 
     # ------------------------------------------------------------------
     # Settings tab (bridge control + activity log + help)
@@ -859,6 +1208,13 @@ class ClipBoardSyncGUI(ctk.CTk):
                                                 font=ctk.CTkFont(family=MONO, size=12),
                                                 text_color=TEXT_FAINT, anchor="w")
         self.settings_status_lbl.grid(row=0, column=1, sticky="w")
+
+        self.require_pin_var = ctk.BooleanVar(value=self.trust_store.require_pin)
+        chk_pin = ctk.CTkCheckBox(sec1, text="Require PIN for new devices (first connection only)",
+                                  variable=self.require_pin_var, command=self._toggle_require_pin,
+                                  text_color=TEXT_SECONDARY, fg_color=PRIMARY_STRONG,
+                                  hover_color=PRIMARY_STRONG, font=ctk.CTkFont(family=FONT, size=12))
+        chk_pin.grid(row=3, column=0, padx=20, pady=(0, 16), sticky="w")
 
         # Activity log
         sec2 = ctk.CTkFrame(frame, fg_color=SURFACE, corner_radius=RADIUS_CARD)
@@ -1037,7 +1393,9 @@ class ClipBoardSyncGUI(ctk.CTk):
         if messages:
             self.log_textbox.configure(state="normal")
             for msg in messages:
-                self.log_textbox.insert("end", msg.strip() + "\n")
+                line = msg.strip()
+                self.log_textbox.insert("end", line + "\n")
+                self._log_lines.append(line)
             if self.auto_scroll_logs.get():
                 self.log_textbox.see("end")
             self.log_textbox.configure(state="disabled")
@@ -1052,9 +1410,9 @@ class ClipBoardSyncGUI(ctk.CTk):
             self.status_badge.configure(text="● ONLINE", text_color=SUCCESS)
             self.settings_status_lbl.configure(text=f"Status: Online (port {self.port})", text_color=SUCCESS)
             self.toggle_engine_btn.configure(text="STOP BRIDGE", fg_color=DANGER,
-                                             hover_color="#B23C3C", text_color=ON_ACCENT)
+                                             hover_color=DANGER_HOVER, text_color=ON_ACCENT)
             self.settings_toggle_btn.configure(text="Stop bridge", fg_color=DANGER,
-                                               hover_color="#B23C3C", text_color=ON_ACCENT)
+                                               hover_color=DANGER_HOVER, text_color=ON_ACCENT)
             self.conn_count_label.configure(text=f"{cnt} devices connected")
         else:
             self.status_badge.configure(text="● OFFLINE", text_color=DANGER)
@@ -1066,6 +1424,16 @@ class ClipBoardSyncGUI(ctk.CTk):
             self.conn_count_label.configure(text="0 devices connected")
 
         self.conn_label.configure(text=f"{cnt} devices connected")
+
+        if self._active_tab == "devices":
+            pair_sig = (
+                tuple(self.trust_store.trusted_devices()),
+                self.trust_store.pairing_pin,
+                self.trust_store.require_pin,
+            )
+            if pair_sig != self._last_pairing_sig:
+                self._last_pairing_sig = pair_sig
+                self._refresh_pairing_view()
 
         if self._active_tab in ("clipboard", "pinned", "files"):
             hist = sync_hub.get_history()
@@ -1085,6 +1453,12 @@ class ClipBoardSyncGUI(ctk.CTk):
         else:
             self.engine.stop()
             self.status_badge.configure(text="● OFFLINE", text_color=DANGER)
+
+    def _toggle_require_pin(self) -> None:
+        enabled = bool(self.require_pin_var.get())
+        self.trust_store.require_pin = enabled
+        self.log_queue.put("[ACTION] PIN pairing " + ("enabled" if enabled else "disabled") + " for new devices.")
+        self._refresh_pairing_view()
 
     def clear_logs(self) -> None:
         self.log_textbox.configure(state="normal")

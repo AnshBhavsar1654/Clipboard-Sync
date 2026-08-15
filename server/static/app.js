@@ -24,6 +24,15 @@ document.addEventListener("DOMContentLoaded", () => {
     const toastContainer = document.getElementById("toast-container");
     const feedSearch = document.getElementById("feed-search");
 
+    // Auth / pairing + theme elements
+    const authScreen = document.getElementById("auth-screen");
+    const appBody = document.getElementById("app-body");
+    const pinInput = document.getElementById("pin-input");
+    const pinSubmit = document.getElementById("pin-submit");
+    const pinError = document.getElementById("pin-error");
+    const themeToggle = document.getElementById("theme-toggle");
+    const themeToggleIcon = document.getElementById("theme-toggle-icon");
+
     // Device Identification Setup
     let deviceId = localStorage.getItem("clipboardsync_device_id");
     if (!deviceId) {
@@ -58,8 +67,9 @@ document.addEventListener("DOMContentLoaded", () => {
             ws.onopen = () => {
                 isConnecting = false;
                 reconnectDelay = 1000;
-                updateConnectionStatus("connected");
+                updateConnectionStatus("connecting");
                 showToast("Connected to ClipBoardSync Engine", "success");
+                ws.send(JSON.stringify({ type: "auth_request", device_id: deviceId }));
             };
 
             ws.onmessage = (event) => {
@@ -111,7 +121,29 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // Message Processing
     function handleIncomingMessage(msg) {
+        if (msg.type === "auth_required") {
+            showAuthScreen();
+            updateConnectionStatus("connecting");
+            return;
+        }
+        if (msg.type === "auth_error") {
+            updateConnectionStatus("connecting");
+            showPinError(msg.message || "Incorrect PIN. Try again.");
+            return;
+        }
+        if (msg.type === "auth_success") {
+            hideAuthScreen();
+            updateConnectionStatus("connected");
+            if (Array.isArray(msg.items)) {
+                feedItems = msg.items.slice().reverse(); // newest first
+                itemCounter.textContent = `${feedItems.length} ${feedItems.length === 1 ? "item" : "items"}`;
+                applyFilter();
+            }
+            return;
+        }
         if (msg.type === "history" && Array.isArray(msg.items)) {
+            hideAuthScreen();
+            updateConnectionStatus("connected");
             feedItems = msg.items.slice().reverse(); // newest first
             itemCounter.textContent = `${feedItems.length} ${feedItems.length === 1 ? "item" : "items"}`;
             applyFilter();
@@ -398,6 +430,56 @@ document.addEventListener("DOMContentLoaded", () => {
         }, 4000);
     }
 
+    // Pairing screen helpers
+    function showAuthScreen() {
+        authScreen.hidden = false;
+        appBody.hidden = true;
+        clearPinError();
+        setTimeout(() => pinInput.focus(), 50);
+    }
+
+    function hideAuthScreen() {
+        authScreen.hidden = true;
+        appBody.hidden = false;
+        clearPinError();
+    }
+
+    function showPinError(message) {
+        pinError.textContent = message;
+        pinError.hidden = false;
+    }
+
+    function clearPinError() {
+        pinError.hidden = true;
+        pinError.textContent = "";
+    }
+
+    function submitPin() {
+        const pin = pinInput.value.replace(/\D/g, "").slice(0, 6);
+        if (pin.length !== 6) {
+            showPinError("Enter the 6-digit PIN shown on your computer.");
+            return;
+        }
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+            showPinError("Bridge is offline. Reconnecting\u2026");
+            return;
+        }
+        clearPinError();
+        ws.send(JSON.stringify({ type: "auth_pin", device_id: deviceId, pin: pin }));
+    }
+
+    // Theme helpers
+    function currentTheme() {
+        return document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
+    }
+
+    function applyTheme(theme) {
+        document.documentElement.setAttribute("data-theme", theme);
+        themeToggleIcon.innerHTML = theme === "dark"
+            ? '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>'
+            : '<circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path>';
+    }
+
     // Event Listeners
     uploadImgBtn.addEventListener("click", () => imageInput.click());
     uploadFileBtn.addEventListener("click", () => fileInput.click());
@@ -417,6 +499,26 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 
     feedSearch.addEventListener("input", applyFilter);
+
+    pinSubmit.addEventListener("click", submitPin);
+    pinInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+            e.preventDefault();
+            submitPin();
+        }
+    });
+    pinInput.addEventListener("input", () => {
+        pinInput.value = pinInput.value.replace(/\D/g, "").slice(0, 6);
+        clearPinError();
+    });
+
+    applyTheme(currentTheme());
+    themeToggle.addEventListener("click", () => {
+        const next = currentTheme() === "dark" ? "light" : "dark";
+        localStorage.setItem("clipboardsync_theme", next);
+        applyTheme(next);
+        showToast(next === "light" ? "Light theme enabled" : "Dark theme enabled", "info");
+    });
 
     document.addEventListener("keydown", (e) => {
         if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {

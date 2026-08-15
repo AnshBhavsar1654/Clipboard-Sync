@@ -12,6 +12,7 @@ import qrcode
 import uvicorn
 from client.config import Config
 from client.main import ClipBoardSyncApp, _install_signal_handlers
+from server.auth import get_store
 from server.main import app as fastapi_app
 
 logger = logging.getLogger("clipboardsync_runner")
@@ -36,12 +37,17 @@ def print_pairing_instructions(port: int) -> None:
     """Render terminal QR code and mobile connection guidance."""
     ip = get_local_lan_ip()
     mobile_url = f"http://{ip}:{port}"
-    
+    store = get_store()
+    pin = store.pairing_pin if store.require_pin else "disabled"
+
     print("\n" + "=" * 62)
     print("    🚀 CLIPBOARDSYNC CROSS-DEVICE BRIDGE RUNNING 🚀")
     print("=" * 62)
     print(f"📱 MOBILE CONNECTION URL:  {mobile_url}")
     print("   Make sure your phone is connected to the same Wi-Fi network!")
+    if store.require_pin:
+        print(f"🔐 PAIRING PIN:            {pin}")
+        print("   New devices must enter this PIN once; paired devices are remembered.")
     print("   Open your camera app and scan this QR Code to launch:")
     print("=" * 62)
 

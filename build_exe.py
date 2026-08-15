@@ -9,6 +9,30 @@ import subprocess
 import sys
 
 
+def _ensure_icon(root_dir: Path) -> Path | None:
+    """Regenerate the Windows .ico from assets/icon.png so every build uses the latest logo."""
+    assets = root_dir / "assets"
+    png_file = assets / "icon.png"
+    ico_file = assets / "clipboardsync.ico"
+
+    if png_file.exists():
+        stale = not ico_file.exists() or png_file.stat().st_mtime > ico_file.stat().st_mtime
+        if stale:
+            try:
+                from PIL import Image
+                icon = Image.open(png_file).convert("RGBA")
+                icon.save(
+                    ico_file,
+                    format="ICO",
+                    sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
+                )
+                print(f"[*] Generated application icon: {ico_file}")
+            except Exception as exc:
+                print(f"[!] Could not generate icon from icon.png: {exc}")
+
+    return ico_file if ico_file.exists() else None
+
+
 def main() -> None:
     """Run PyInstaller to compile ClipBoardSync Desktop Application."""
     print("=" * 64)
@@ -36,6 +60,12 @@ def main() -> None:
     # Determine OS path separator for PyInstaller --add-data (semicolon on Windows, colon on Linux/macOS)
     sep = ";" if sys.platform == "win32" else ":"
 
+    # Application icon (regenerated from icon.png, embedded in the exe and
+    # bundled for the runtime window/taskbar icon)
+    icon_file = _ensure_icon(root_dir)
+    icon_arg = f"--icon={icon_file}" if icon_file else "--icon="
+    asset_arg = f"--add-data=assets{sep}assets"
+
     # Build command arguments
     pyinstaller_args = [
         sys.executable,
@@ -46,6 +76,8 @@ def main() -> None:
         "--windowed",
         "--noconsole",
         f"--add-data=server/static{sep}server/static",
+        asset_arg,
+        icon_arg,
         "--collect-data", "customtkinter",
         "--hidden-import=uvicorn.logging",
         "--hidden-import=uvicorn.loops.auto",
