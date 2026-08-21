@@ -10,7 +10,6 @@ env/
 ENV/
 
 build/
-dist/
 wheels/
 *.egg-info/
 .eggs/
