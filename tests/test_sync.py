@@ -195,3 +195,99 @@ def test_open_mode_skips_pin() -> None:
         assert initial["type"] == "history"
         assert initial["items"] == []
 
+
+def test_folder_broadcast_and_history() -> None:
+    client = TestClient(app)
+
+    with client.websocket_connect("/ws") as ws_a:
+        ws_a.receive_json()  # history
+        with client.websocket_connect("/ws") as ws_b:
+            ws_b.receive_json()
+            payload = {
+                "device_id": "PC-AAAAA",
+                "type": "folder",
+                "content": "Folder: Photos.zip (12 items)",
+                "filename": "Photos.zip",
+                "filesize": 12345,
+                "file_url": "/api/files/abc123def4.zip",
+                "entry_count": 12,
+            }
+            ws_a.send_json(payload)
+            got = ws_b.receive_json()
+            assert got["type"] == "folder"
+            assert got["filename"] == "Photos.zip"
+            assert got["entry_count"] == 12
+            assert got["file_url"] == "/api/files/abc123def4.zip"
+
+    hist = client.get("/api/history").json()
+    assert hist["items"][-1]["type"] == "folder"
+
+
+def test_upload_streams_and_download_supports_range(tmp_path) -> None:
+    from server.main import UPLOADS_DIR
+    client = TestClient(app)
+    big = b"A" * (2 * 1024 * 1024)  # 2 MB exercises chunked path
+    resp = client.post(
+        "/api/upload",
+        files={"file": ("big.bin", big, "application/octet-stream")},
+        data={"item_type": "file"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["url"].startswith("/api/files/")
+    assert data["filesize"] == len(big)
+
+    name = data["url"].rsplit("/", 1)[-1]
+    assert (UPLOADS_DIR / name).is_file()
+
+    full = client.get(f"/api/files/{name}")
+    assert full.status_code == 200
+    assert full.headers.get("Accept-Ranges") == "bytes"
+    assert "attachment" in full.headers.get("Content-Disposition", "")
+
+    part = client.get(f"/api/files/{name}", headers={"Range": "bytes=0-99"})
+    assert part.status_code == 206
+    assert len(part.content) == 100
+    assert part.headers.get("Content-Range", "").startswith("bytes 0-99/")
+
+    bad = client.get("/api/files/not_a_real_name!!!")
+    assert bad.status_code == 404
+
+    over = client.post(
+        "/api/upload",
+        files={"file": ("x.zip", b"data", "application/zip")},
+        data={"item_type": "folder", "entry_count": "3"},
+    )
+    assert over.status_code == 200
+    assert over.json()["type"] == "folder"
+
+
+def test_folder_zip_helper(tmp_path) -> None:
+    from server.folder_zip import zip_directory
+    import zipfile
+    root = tmp_path / "Photos"
+    (root / "sub").mkdir(parents=True)
+    (root / "a.txt").write_text("hello")
+    (root / "sub" / "b.txt").write_text("world")
+    (root / "__pycache__").mkdir(exist_ok=True)
+    (root / "__pycache__" / "skip.pyc").write_text("x")
+    zip_path, zip_name, entries, skipped = zip_directory(root)
+    try:
+        assert zip_name == "Photos.zip"
+        assert entries == 2
+        assert skipped == 1
+        with zipfile.ZipFile(zip_path) as zf:
+            assert sorted(zf.namelist()) == ["a.txt", "sub/b.txt"]
+    finally:
+        zip_path.unlink(missing_ok=True)
+
+
+def test_beacon_parse() -> None:
+    import json
+    from server.discovery import parse_beacon
+    good = json.dumps({"magic": "ClipBoardSync", "v": 1, "name": "DESK", "port": 8000}).encode()
+    assert parse_beacon(good) == {"name": "DESK", "port": 8000}
+    assert parse_beacon(b"garbage") is None
+    bad = json.dumps({"magic": "Other", "v": 1}).encode()
+    assert parse_beacon(bad) is None
+

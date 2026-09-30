@@ -111,8 +111,14 @@
             </div>
 
             <!-- Hidden file inputs -->
-            <input type="file" id="file-input" style="display: none;">
+            <input type="file" id="file-input" multiple style="display: none;">
             <input type="file" id="image-input" accept="image/*" style="display: none;">
+            <input type="file" id="folder-input" webkitdirectory style="display: none;">
+
+            <div id="upload-progress" class="upload-progress" hidden>
+                <div class="upload-progress-label"><span id="upload-progress-text">Sharing…</span><span id="upload-progress-pct">0%</span></div>
+                <div class="upload-progress-track"><div id="upload-progress-bar" class="upload-progress-bar"></div></div>
+            </div>
 
             <div class="button-toolbar">
                 <button id="paste-and-send-btn" class="secondary-btn"
@@ -136,10 +142,17 @@
 
                 <button id="upload-file-btn" class="secondary-btn" title="Share a file with your computer">
                     <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="1.8" fill="none">
-                        <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path>
+                        <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2-2V9z"></path>
                         <polyline points="13 2 13 9 20 9"></polyline>
                     </svg>
                     File
+                </button>
+
+                <button id="upload-folder-btn" class="secondary-btn" title="Share a folder as one .zip">
+                    <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="1.8" fill="none">
+                        <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
+                    </svg>
+                    Folder
                 </button>
 
                 <button id="send-btn" class="primary-btn">

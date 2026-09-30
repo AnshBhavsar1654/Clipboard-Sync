@@ -173,7 +173,7 @@ class SyncHub:
         content = message.get("content", "")
         device_id = message.get("device_id", "unknown")
 
-        if content_type not in ("text", "image", "file"):
+        if content_type not in ("text", "image", "file", "folder"):
             logger.warning("Received unsupported message format: %s", message)
             return
 
@@ -185,6 +185,8 @@ class SyncHub:
             filename=message.get("filename"),
             filesize=message.get("filesize"),
             file_url=message.get("file_url"),
+            entry_count=message.get("entry_count"),
+            skipped_count=message.get("skipped_count"),
         )
 
         async with self._lock:

@@ -19,11 +19,13 @@ class ClipboardItem(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     device_id: str
     timestamp: str = Field(default_factory=get_utc_now_iso)
-    type: str = "text"  # "text", "image", "file"
+    type: str = "text"  # "text", "image", "file", "folder"
     content: str = ""
     filename: str | None = None
     filesize: int | None = None
     file_url: str | None = None
+    entry_count: int | None = None
+    skipped_count: int | None = None
 
     def to_message_dict(self) -> dict[str, Any]:
         """Convert to standard broadcast dictionary payload."""
@@ -40,6 +42,10 @@ class ClipboardItem(BaseModel):
             data["filesize"] = self.filesize
         if self.file_url is not None:
             data["file_url"] = self.file_url
+        if self.entry_count is not None:
+            data["entry_count"] = self.entry_count
+        if self.skipped_count is not None:
+            data["skipped_count"] = self.skipped_count
         return data
 
 

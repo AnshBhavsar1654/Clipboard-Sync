@@ -14,6 +14,7 @@ import io
 import json
 import logging
 import queue
+import shutil
 import socket
 import sys
 import threading
@@ -80,7 +81,7 @@ THEMES: dict[str, dict[str, str]] = {"dark": DARK_THEME, "light": LIGHT_THEME}
 
 # Module-level color tokens (active theme). Reassigned by _set_theme().
 globals().update(DARK_THEME)
-TYPE_COLORS = {"text": SUCCESS, "image": PRIMARY, "file": WARNING}
+TYPE_COLORS = {"text": SUCCESS, "image": PRIMARY, "file": WARNING, "folder": PRIMARY}
 
 RADIUS_SM = 6
 RADIUS_CARD = 10
@@ -96,6 +97,7 @@ def _set_theme(name: str) -> None:
         "text": tokens["SUCCESS"],
         "image": tokens["PRIMARY"],
         "file": tokens["WARNING"],
+        "folder": tokens["PRIMARY"],
     }
     ctk.set_appearance_mode(name)
 
@@ -376,6 +378,10 @@ class BackgroundEngine:
         self._server: uvicorn.Server | None = None
         self._client_app: ClipBoardSyncApp | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._peer = None
+        self.peer_status: str = "disconnected"  # disconnected|connecting|connected|code_rejected|retrying
+        self.peer_host: str = ""
+        self._log_queue: queue.Queue[str] | None = None
 
     def start(self, log_queue: queue.Queue[str]) -> None:
         if self.is_running:
@@ -415,6 +421,7 @@ class BackgroundEngine:
             self.is_running = False
 
     async def _async_runner(self, log_queue: queue.Queue[str]) -> None:
+        self._log_queue = log_queue
         log_queue.put(f"[Info] Starting sharing on port {self.port}...")
         uv_config = uvicorn.Config(
             app=fastapi_app,
@@ -446,7 +453,96 @@ class BackgroundEngine:
                 await task
             except asyncio.CancelledError:
                 pass
+        if self._peer is not None:
+            try:
+                await self._peer.stop()
+            except Exception:
+                pass
+            self._peer = None
         log_queue.put("[Info] Sharing is off.")
+
+    # -- PC-to-PC peer ------------------------------------------------------
+    def connect_peer(self, host_ip: str, port: int, pin: str, device_id: str) -> bool:
+        """Join another PC's server. Returns False if sharing isn't running."""
+        if not self.is_running or not self._loop or not self._loop.is_running():
+            return False
+        if self._peer is not None:
+            return False
+        from client.peer_client import PeerConnection
+
+        def _status(s: str) -> None:
+            self.peer_status = s
+            if self._log_queue is not None:
+                if s == "connected":
+                    self._log_queue.put(f"[Info] Connected to other computer at {host_ip}.")
+                elif s.startswith("code_rejected"):
+                    self._log_queue.put("[Error] That computer code did not match. Check it and try again.")
+                elif s == "retrying":
+                    self._log_queue.put("[Info] Reconnecting to the other computer…")
+
+        async def _on_peer_message(msg: dict) -> None:
+            # Inject peer clips into the local hub so they show in this feed.
+            try:
+                await sync_hub.handle_message(None, msg)
+            except Exception:
+                pass
+            # Download shared files/folders in the background.
+            if msg.get("type") in ("file", "folder") and msg.get("file_url"):
+                await self._download_peer_file(host_ip, port, msg)
+
+        async def _start() -> None:
+            self._peer = PeerConnection(host_ip, port, device_id, pin, _on_peer_message, _status)
+            self.peer_host = f"{host_ip}:{port}"
+            self.peer_status = "connecting"
+            self._peer.start()
+
+        asyncio.run_coroutine_threadsafe(_start(), self._loop)
+        return True
+
+    def disconnect_peer(self) -> None:
+        if self._loop and self._loop.is_running() and self._peer is not None:
+            peer, self._peer = self._peer, None
+            asyncio.run_coroutine_threadsafe(peer.stop(), self._loop)
+        else:
+            self._peer = None
+        self.peer_status = "disconnected"
+        self.peer_host = ""
+        if self._log_queue is not None:
+            self._log_queue.put("[Info] Disconnected from the other computer.")
+
+    def send_to_peer(self, message: dict) -> None:
+        """Forward our clips to the connected PC (fire-and-forget)."""
+        if self._loop and self._loop.is_running() and self._peer is not None:
+            asyncio.run_coroutine_threadsafe(self._peer.send(message), self._loop)
+
+    async def _download_peer_file(self, host_ip: str, port: int, msg: dict) -> None:
+        try:
+            import httpx
+            file_url = str(msg.get("file_url") or "")
+            if not file_url.startswith("http"):
+                file_url = f"http://{host_ip}:{port}{file_url if file_url.startswith('/') else '/' + file_url}"
+            filename = str(msg.get("filename") or "shared_file")
+            dest_dir = Path.home() / "Downloads" / "ClipBoardSync"
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest = dest_dir / filename
+            if dest.exists():
+                stem, suffix = dest.stem, dest.suffix
+                i = 1
+                while (dest_dir / f"{stem} ({i}){suffix}").exists():
+                    i += 1
+                dest = dest_dir / f"{stem} ({i}){suffix}"
+            async with httpx.AsyncClient(timeout=300.0) as client:
+                async with client.stream("GET", file_url) as resp:
+                    if resp.status_code not in (200, 206):
+                        return
+                    with dest.open("wb") as out:
+                        async for chunk in resp.aiter_bytes(1024 * 1024):
+                            out.write(chunk)
+            if self._log_queue is not None:
+                kind = "Folder (.zip)" if msg.get("type") == "folder" else "File"
+                self._log_queue.put(f"[Info] {kind} from other computer saved: {dest}")
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -486,6 +582,13 @@ class ClipBoardSyncGUI(ctk.CTk):
         self.trust_store = get_store()
         self._last_pairing_sig: tuple[Any, ...] | None = None
         self._log_lines: list[str] = ["ClipBoardSync is ready. Sharing starts automatically."]
+        # PC-to-PC: auto-discovery + manual connect state
+        from server.discovery import PeerDiscovery
+        self.discovery = PeerDiscovery(port=self.port)
+        self.peer_ip_var = None  # created in _init_ui (needs ctk)
+        self.peer_code_var = None
+        self._last_peer_sig: tuple[Any, ...] | None = None
+        self._peer_device_id = self._load_peer_id()
 
         self.theme_name = self._load_theme_pref()
         _set_theme(self.theme_name)
@@ -776,7 +879,7 @@ class ClipBoardSyncGUI(ctk.CTk):
         hist = [i for i in reversed(sync_hub.get_history()) if i.get("id") not in pinned_ids]
         items = pinned + hist
         if files_only:
-            items = [i for i in items if i.get("type") in ("image", "file")]
+            items = [i for i in items if i.get("type") in ("image", "file", "folder")]
         return items
 
     def _apply_search(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -871,11 +974,23 @@ class ClipBoardSyncGUI(ctk.CTk):
         # Body preview
         if itype == "image":
             self._render_image_body(content_col, content, item)
-        elif itype == "file":
-            fname = item.get("filename") or "File"
+        elif itype in ("file", "folder"):
+            fname = item.get("filename") or ("Folder" if itype == "folder" else "File")
             fsize = item.get("filesize") or 0
-            fsize_str = f"{fsize / 1024:.1f} KB" if fsize < 1024 * 1024 else f"{fsize / (1024 * 1024):.1f} MB"
-            lbl = ctk.CTkLabel(content_col, text=f"{fname}  ·  {fsize_str}",
+            if fsize < 1024:
+                fsize_str = f"{fsize} B"
+            elif fsize < 1024 * 1024:
+                fsize_str = f"{fsize / 1024:.1f} KB"
+            elif fsize < 1024 * 1024 * 1024:
+                fsize_str = f"{fsize / (1024 * 1024):.1f} MB"
+            else:
+                fsize_str = f"{fsize / (1024 * 1024 * 1024):.2f} GB"
+            detail = fname
+            if itype == "folder" and item.get("entry_count"):
+                detail = f"{fname}  ·  {item.get('entry_count')} items"
+            if item.get("skipped_count"):
+                detail = f"{detail}  ·  skipped {item.get('skipped_count')}"
+            lbl = ctk.CTkLabel(content_col, text=f"{detail}  ·  {fsize_str}",
                                font=ctk.CTkFont(family=FONT, size=14), text_color=TEXT,
                                justify="left", anchor="w", wraplength=520)
             lbl.grid(row=1, column=0, pady=(8, 6), sticky="w")
@@ -904,17 +1019,18 @@ class ClipBoardSyncGUI(ctk.CTk):
         pin_btn.grid(row=0, column=0, pady=(0, 6))
         Tooltip(pin_btn, "Remove pin" if is_pinned else "Keep at top")
 
-        if itype == "file":
+        if itype in ("file", "folder"):
             file_url = str(item.get("file_url") or "")
             if file_url and not file_url.startswith("http"):
-                file_url = f"{self.mobile_url}{file_url}"
+                file_url = f"{self.mobile_url}{file_url}" if file_url.startswith("/") else f"{self.mobile_url}/{file_url}"
+            fname = str(item.get("filename") or ("folder.zip" if itype == "folder" else "file"))
             act_btn = ctk.CTkButton(
                 actions, width=30, height=30, corner_radius=RADIUS_SM, text="",
                 image=_make_icon("download", TEXT_SECONDARY, 16),
                 fg_color="transparent", hover_color=HOVER,
-                command=lambda u=file_url: webbrowser.open(u) if u else None)
+                command=lambda u=file_url, fn=fname: self.save_shared_item(u, fn))
             act_btn.grid(row=1, column=0)
-            Tooltip(act_btn, "Save file")
+            Tooltip(act_btn, "Save folder (.zip)" if itype == "folder" else "Save file")
         elif itype == "image":
             if content.startswith("data:image/"):
                 act_btn = ctk.CTkButton(
@@ -927,12 +1043,13 @@ class ClipBoardSyncGUI(ctk.CTk):
             else:
                 img_url = str(item.get("file_url") or item.get("content") or "")
                 if img_url and not img_url.startswith("http"):
-                    img_url = f"{self.mobile_url}{img_url}"
+                    img_url = f"{self.mobile_url}{img_url}" if img_url.startswith("/") else f"{self.mobile_url}/{img_url}"
+                img_name = str(item.get("filename") or "photo.png")
                 act_btn = ctk.CTkButton(
                     actions, width=30, height=30, corner_radius=RADIUS_SM, text="",
                     image=_make_icon("download", TEXT_SECONDARY, 16),
                     fg_color="transparent", hover_color=HOVER,
-                    command=lambda u=img_url: webbrowser.open(u) if u else None)
+                    command=lambda u=img_url, fn=img_name: self.save_shared_item(u, fn))
                 act_btn.grid(row=1, column=0)
                 Tooltip(act_btn, "Save photo")
         else:
@@ -990,6 +1107,28 @@ class ClipBoardSyncGUI(ctk.CTk):
             p.write_text(json.dumps(self._pinned, indent=2), encoding="utf-8")
         except Exception:
             pass
+
+    def _load_peer_id(self) -> str:
+        """Stable PC identity used when joining another computer (PC-XXXX)."""
+        try:
+            p = Path.home() / ".clipboardsync" / "peer_id.json"
+            if p.exists():
+                data = json.loads(p.read_text(encoding="utf-8"))
+                pid = str(data.get("peer_id", "")).strip()
+                if pid:
+                    return pid
+        except Exception:
+            pass
+        import random
+        import string
+        pid = "PC-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=5))
+        try:
+            p = Path.home() / ".clipboardsync" / "peer_id.json"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps({"peer_id": pid}, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+        return pid
 
     # ------------------------------------------------------------------
     # Devices tab (QR pairing)
@@ -1073,7 +1212,14 @@ class ClipBoardSyncGUI(ctk.CTk):
                                       height=36, corner_radius=RADIUS_SM, fg_color=SURFACE_RAISED,
                                       hover_color=HOVER, text_color=TEXT,
                                       command=self.send_any_file)
-        btn_send_file.grid(row=0, column=1)
+        btn_send_file.grid(row=0, column=1, padx=(0, 12))
+
+        btn_send_folder = ctk.CTkButton(btn_box, text="Send folder", image=_make_icon("folder", TEXT, 15),
+                                        font=ctk.CTkFont(family=FONT, size=13, weight="bold"),
+                                        height=36, corner_radius=RADIUS_SM, fg_color=SURFACE_RAISED,
+                                        hover_color=HOVER, text_color=TEXT,
+                                        command=self.send_folder)
+        btn_send_folder.grid(row=0, column=2)
 
         self.conn_count_label = ctk.CTkLabel(details, text="No phones connected",
                                              font=ctk.CTkFont(family=FONT, size=14, weight="bold"),
@@ -1118,7 +1264,7 @@ class ClipBoardSyncGUI(ctk.CTk):
                                        command=self._regenerate_pin)
         btn_regenerate.grid(row=0, column=1, rowspan=2, padx=18, pady=12)
 
-        trusted_lbl = ctk.CTkLabel(trust_card, text="Connected phones",
+        trusted_lbl = ctk.CTkLabel(trust_card, text="Connected devices",
                                    font=ctk.CTkFont(family=FONT, size=13, weight="bold"),
                                    text_color=TEXT, anchor="w")
         trusted_lbl.pack(anchor="w", padx=20, pady=(0, 6))
@@ -1126,6 +1272,67 @@ class ClipBoardSyncGUI(ctk.CTk):
         self.trusted_scroll = ctk.CTkScrollableFrame(trust_card, fg_color="transparent", height=116)
         self.trusted_scroll.pack(fill="x", padx=20, pady=(0, 18))
         self.trusted_scroll.grid_columnconfigure(0, weight=1)
+
+        # --- Other computers on this Wi-Fi (auto-find + manual fallback) ---
+        peer_card = ctk.CTkFrame(frame, fg_color=SURFACE, corner_radius=RADIUS_CARD)
+        peer_card.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(20, 0))
+        peer_card.grid_columnconfigure(0, weight=1)
+
+        p_head = ctk.CTkLabel(peer_card, text="Other computers nearby",
+                              font=ctk.CTkFont(family=FONT, size=16, weight="bold"),
+                              text_color=TEXT, anchor="w")
+        p_head.grid(row=0, column=0, padx=20, pady=(16, 4), sticky="w")
+
+        p_desc = ctk.CTkLabel(peer_card,
+                              text="Computers running ClipBoardSync on this Wi-Fi appear here. "
+                                   "If none appear (hotel Wi-Fi often blocks this), enter the address and code manually.",
+                              font=ctk.CTkFont(family=FONT, size=13), text_color=TEXT_SECONDARY,
+                              justify="left", anchor="w", wraplength=860)
+        p_desc.grid(row=1, column=0, padx=20, pady=(0, 10), sticky="w")
+
+        self.peer_status_lbl = ctk.CTkLabel(peer_card, text="Searching for computers…",
+                                            font=ctk.CTkFont(family=FONT, size=12),
+                                            text_color=TEXT_FAINT, anchor="w")
+        self.peer_status_lbl.grid(row=2, column=0, padx=20, pady=(0, 6), sticky="w")
+
+        self.peer_scroll = ctk.CTkScrollableFrame(peer_card, fg_color="transparent", height=84)
+        self.peer_scroll.grid(row=3, column=0, padx=20, pady=(0, 6), sticky="ew")
+        self.peer_scroll.grid_columnconfigure(0, weight=1)
+
+        manual = ctk.CTkFrame(peer_card, fg_color="transparent")
+        manual.grid(row=4, column=0, padx=20, pady=(0, 18), sticky="ew")
+        manual.grid_columnconfigure(0, weight=1)
+        manual.grid_columnconfigure(1, weight=1)
+        self.peer_ip_var = ctk.StringVar(value="")
+        self.peer_code_var = ctk.StringVar(value="")
+        self.peer_ip_entry = ctk.CTkEntry(
+            manual, placeholder_text="Address, e.g. 192.168.1.6",
+            height=36, corner_radius=RADIUS_SM,
+            fg_color=SURFACE_RAISED, border_color=BORDER,
+            text_color=TEXT, placeholder_text_color=TEXT_FAINT,
+            textvariable=self.peer_ip_var)
+        self.peer_ip_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self.peer_code_entry = ctk.CTkEntry(
+            manual, placeholder_text="6-digit code from that computer",
+            height=36, corner_radius=RADIUS_SM,
+            fg_color=SURFACE_RAISED, border_color=BORDER,
+            text_color=TEXT, placeholder_text_color=TEXT_FAINT,
+            textvariable=self.peer_code_var)
+        self.peer_code_entry.grid(row=0, column=1, sticky="ew", padx=(0, 8))
+        self.peer_connect_btn = ctk.CTkButton(
+            manual, text="Connect", width=120, height=36,
+            corner_radius=RADIUS_SM, fg_color=PRIMARY_STRONG,
+            hover_color=HOVER_PRIMARY, text_color=ON_ACCENT,
+            font=ctk.CTkFont(family=FONT, size=12, weight="bold"),
+            command=self._connect_peer_manual)
+        self.peer_connect_btn.grid(row=0, column=2)
+        self.peer_disconnect_btn = ctk.CTkButton(
+            manual, text="Disconnect", width=120, height=36,
+            corner_radius=RADIUS_SM, fg_color=SURFACE_RAISED,
+            hover_color=HOVER, text_color=TEXT,
+            font=ctk.CTkFont(family=FONT, size=12, weight="bold"),
+            command=self._disconnect_peer)
+        self.peer_disconnect_btn.grid(row=0, column=3, padx=(8, 0))
 
         return frame
 
@@ -1352,18 +1559,50 @@ class ClipBoardSyncGUI(ctk.CTk):
         except Exception as exc:
             self.log_queue.put(f"[Error] Could not share the photo: {exc}")
 
+    def save_shared_item(self, file_url: str, filename: str) -> None:
+        """Download a shared file/folder link to disk (streamed, fast)."""
+        if not file_url:
+            self.log_queue.put("[Error] Nothing to save yet. Try again in a moment.")
+            return
+        initial = Path.home() / "Downloads" / "ClipBoardSync" / filename
+        dest_str = filedialog.asksaveasfilename(
+            title="Save shared file",
+            initialfile=filename,
+            initialdir=str(initial.parent),
+        )
+        if not dest_str:
+            return
+        self.log_queue.put(f"[Info] Saving '{filename}'…")
+        threading.Thread(
+            target=self._save_shared_item_worker,
+            args=(file_url, dest_str, filename),
+            name="clipboardsync-download",
+            daemon=True,
+        ).start()
+
+    def _save_shared_item_worker(self, file_url: str, dest_str: str, filename: str) -> None:
+        try:
+            import urllib.request
+            req = urllib.request.Request(file_url, headers={"User-Agent": "ClipBoardSync"})
+            with urllib.request.urlopen(req, timeout=300) as resp, open(dest_str, "wb") as out:
+                shutil.copyfileobj(resp, out, length=1024 * 1024)
+            self.log_queue.put(f"[Info] Saved '{filename}' to {dest_str}.")
+        except Exception as exc:
+            self.log_queue.put(f"[Error] Could not save '{filename}'. Check the connection and try again. ({exc})")
+
     def send_any_file(self) -> None:
-        """Let the user pick any file and share it with the phone."""
+        """Let the user pick any file and share it."""
         filepath = filedialog.askopenfilename(title="Choose a file to share")
         if not filepath:
             return
         try:
-            import shutil
             import uuid
             from server.main import UPLOADS_DIR
             safe_name = f"{uuid.uuid4().hex[:10]}{Path(filepath).suffix}"
             dest = UPLOADS_DIR / safe_name
-            shutil.copy2(filepath, dest)
+            # Streamed copy (no full-RAM read) so big files stay fast
+            with open(filepath, "rb") as src, dest.open("wb") as out:
+                shutil.copyfileobj(src, out, length=1024 * 1024)
 
             from server.models import ClipboardItem, get_utc_now_iso
             item = ClipboardItem(
@@ -1373,17 +1612,73 @@ class ClipBoardSyncGUI(ctk.CTk):
                 content=f"File: {Path(filepath).name}",
                 filename=Path(filepath).name,
                 filesize=Path(filepath).stat().st_size,
-                file_url=f"/uploads/{safe_name}",
+                file_url=f"/api/files/{safe_name}",
             )
             self._broadcast_item(item.to_message_dict())
-            self.log_queue.put(f"[Info] Shared file '{Path(filepath).name}' with your phone.")
+            self.log_queue.put(f"[Info] Shared file '{Path(filepath).name}'. Others can download it directly.")
             self._refresh_active_list()
         except Exception as exc:
             self.log_queue.put(f"[Error] Could not share the file: {exc}")
 
+    def send_folder(self) -> None:
+        """Let the user pick a folder, zip it, and share one .zip."""
+        folder = filedialog.askdirectory(title="Choose a folder to share")
+        if not folder:
+            return
+        self.log_queue.put(f"[Info] Zipping '{Path(folder).name}'…")
+        threading.Thread(
+            target=self._send_folder_worker,
+            args=(folder,),
+            name="clipboardsync-zip",
+            daemon=True,
+        ).start()
+
+    def _send_folder_worker(self, folder: str) -> None:
+        try:
+            import uuid
+            from server.folder_zip import zip_directory
+            from server.main import UPLOADS_DIR
+            zip_path, zip_name, entries, skipped = zip_directory(folder)
+            try:
+                size = zip_path.stat().st_size
+                if size > 1024 * 1024 * 1024:
+                    self.log_queue.put(f"[Error] '{Path(folder).name}' is too big to share (over 1 GB zipped).")
+                    return
+                safe_name = f"{uuid.uuid4().hex[:10]}.zip"
+                dest = UPLOADS_DIR / safe_name
+                shutil.move(str(zip_path), str(dest))
+                from server.models import ClipboardItem, get_utc_now_iso
+                item = ClipboardItem(
+                    device_id="This computer",
+                    timestamp=get_utc_now_iso(),
+                    type="folder",
+                    content=f"Folder: {zip_name} ({entries} items)",
+                    filename=zip_name,
+                    filesize=size,
+                    file_url=f"/api/files/{safe_name}",
+                    entry_count=entries,
+                    skipped_count=skipped,
+                )
+                self._broadcast_item(item.to_message_dict())
+                extra = f" (skipped {skipped} system files)" if skipped else ""
+                self.log_queue.put(f"[Info] Shared folder '{zip_name}' ({entries} items){extra}.")
+                self._refresh_active_list()
+            finally:
+                try:
+                    Path(zip_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
+        except Exception as exc:
+            self.log_queue.put(f"[Error] Could not share the folder: {exc}")
+
     def _broadcast_item(self, message: dict[str, Any]) -> None:
         if self.engine._loop and self.engine._loop.is_running():
             asyncio.run_coroutine_threadsafe(sync_hub.handle_message(None, message), self.engine._loop)
+        # Two-way PC-to-PC: also forward our clips to the connected computer.
+        try:
+            self.engine.send_to_peer(message)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Automation loops
@@ -1391,7 +1686,119 @@ class ClipBoardSyncGUI(ctk.CTk):
     def _start_automation(self) -> None:
         self.after(100, self._process_log_queue)
         self.after(2000, self._poll_hub_status)
+        try:
+            self.discovery.start()
+        except Exception:
+            pass
         self.toggle_engine()
+
+    # ------------------------------------------------------------------
+    # PC-to-PC: auto-found computers + manual address + code
+    # ------------------------------------------------------------------
+    def _connect_peer_manual(self) -> None:
+        ip = (self.peer_ip_var.get() if self.peer_ip_var else "").strip()
+        code = (self.peer_code_var.get() if self.peer_code_var else "").strip().replace(" ", "")
+        if not ip:
+            self.log_queue.put("[Error] Enter the other computer's address first (e.g. 192.168.1.6).")
+            return
+        if len(code) != 6 or not code.isdigit():
+            self.log_queue.put("[Error] Enter the 6-digit code shown on the other computer.")
+            return
+        self._connect_peer(ip, self.port, code)
+
+    def _connect_peer(self, ip: str, port: int, code: str) -> None:
+        if not self.engine.is_running:
+            self.log_queue.put("[Error] Start sharing first, then connect to the other computer.")
+            return
+        if self.engine._peer is not None:
+            self.log_queue.put("[Info] Already connected to another computer. Disconnect first.")
+            return
+        # Quick pre-flight: is there really a ClipBoardSync server there?
+        # (Surfaces firewall problems in 2s instead of hanging.)
+        def _check_and_connect() -> None:
+            import urllib.request
+            try:
+                with urllib.request.urlopen(f"http://{ip}:{port}/api/history", timeout=4) as resp:
+                    if resp.status != 200:
+                        raise OSError(f"HTTP {resp.status}")
+            except Exception as exc:
+                self.log_queue.put(
+                    f"[Error] Couldn't reach {ip}:{port}. Same Wi-Fi? Allow ClipBoardSync through the firewall. ({exc})"
+                )
+                return
+            ok = self.engine.connect_peer(ip, port, code, self._peer_device_id)
+            if ok:
+                self.log_queue.put(f"[Info] Connecting to other computer at {ip}…")
+            else:
+                self.log_queue.put("[Error] Could not start the computer connection. Try again.")
+        threading.Thread(target=_check_and_connect, name="peer-preflight", daemon=True).start()
+
+    def _disconnect_peer(self) -> None:
+        self.engine.disconnect_peer()
+        self._refresh_peer_view(force=True)
+
+    def _refresh_peer_view(self, force: bool = False) -> None:
+        if not hasattr(self, "peer_scroll"):
+            return
+        try:
+            found = self.discovery.peers() if hasattr(self, "discovery") else []
+        except Exception:
+            found = []
+        status = getattr(self.engine, "peer_status", "disconnected")
+        host = getattr(self.engine, "peer_host", "")
+        sig = (tuple((p.get("ip"), p.get("port"), p.get("name")) for p in found), status, host)
+        if not force and sig == self._last_peer_sig:
+            return
+        self._last_peer_sig = sig
+
+        if status == "connected" and host:
+            self.peer_status_lbl.configure(text=f"Connected to other computer at {host}.", text_color=SUCCESS)
+        elif status == "connecting":
+            self.peer_status_lbl.configure(text="Connecting to other computer…", text_color=WARNING)
+        elif status == "retrying":
+            self.peer_status_lbl.configure(text="Connection lost. Retrying…", text_color=WARNING)
+        elif status.startswith("code_rejected"):
+            self.peer_status_lbl.configure(text="That code did not match. Check it and try again.", text_color=DANGER)
+        elif found:
+            self.peer_status_lbl.configure(
+                text=f"{len(found)} computer{'s' if len(found) != 1 else ''} found nearby." if found else "Searching for computers…",
+                text_color=TEXT_SECONDARY)
+        else:
+            self.peer_status_lbl.configure(text="Searching for computers…", text_color=TEXT_FAINT)
+
+        for child in self.peer_scroll.winfo_children():
+            child.destroy()
+        if not found:
+            lbl = ctk.CTkLabel(self.peer_scroll,
+                               text="No computers found yet. They appear automatically when on the same Wi-Fi.",
+                               font=ctk.CTkFont(family=FONT, size=12), text_color=TEXT_FAINT, anchor="w",
+                               wraplength=640)
+            lbl.grid(row=0, column=0, sticky="w", pady=4)
+            return
+        for i, p in enumerate(found[:8]):
+            row = ctk.CTkFrame(self.peer_scroll, fg_color=SURFACE_RAISED, corner_radius=RADIUS_SM)
+            row.grid(row=i, column=0, sticky="ew", pady=3)
+            row.grid_columnconfigure(0, weight=1)
+            name_lbl = ctk.CTkLabel(row, text=f"{p.get('name', 'Computer')}  ·  {p.get('ip')}",
+                                    font=ctk.CTkFont(family=FONT, size=13), text_color=TEXT, anchor="w")
+            name_lbl.grid(row=0, column=0, padx=12, pady=6, sticky="w")
+            btn = ctk.CTkButton(row, text="Connect", width=90, height=28, corner_radius=RADIUS_SM,
+                                fg_color=PRIMARY_STRONG, hover_color=HOVER_PRIMARY, text_color=ON_ACCENT,
+                                font=ctk.CTkFont(family=FONT, size=11, weight="bold"),
+                                command=lambda ip=p.get("ip"), port=int(p.get("port", 8000)): self._connect_peer_from_list(ip, port))
+            btn.grid(row=0, column=1, padx=8, pady=5)
+
+    def _connect_peer_from_list(self, ip: str, port: int) -> None:
+        code = (self.peer_code_var.get() if self.peer_code_var else "").strip().replace(" ", "")
+        if len(code) != 6 or not code.isdigit():
+            self.log_queue.put(f"[Info] Enter the 6-digit code from {ip} in the box below, then press Connect.")
+            try:
+                self.peer_ip_var.set(ip)
+                self.peer_code_entry.focus_set()
+            except Exception:
+                pass
+            return
+        self._connect_peer(ip, port, code)
 
     def _process_log_queue(self) -> None:
         messages: list[str] = []
@@ -1452,6 +1859,7 @@ class ClipBoardSyncGUI(ctk.CTk):
             if pair_sig != self._last_pairing_sig:
                 self._last_pairing_sig = pair_sig
                 self._refresh_pairing_view()
+            self._refresh_peer_view()
 
         if self._active_tab in ("clipboard", "pinned", "files"):
             hist = sync_hub.get_history()
@@ -1486,6 +1894,14 @@ class ClipBoardSyncGUI(ctk.CTk):
 
     def on_close_request(self) -> None:
         """Close the window and stop sharing cleanly."""
+        try:
+            self.discovery.stop()
+        except Exception:
+            pass
+        try:
+            self.engine.disconnect_peer()
+        except Exception:
+            pass
         if self.engine.is_running:
             self.engine.stop()
         sys.stdout = self.original_stdout
@@ -1523,8 +1939,10 @@ def _format_device(device_id: Any) -> str:
     if not s or s.lower() == "unknown":
         return "Unknown device"
     low = s.lower()
-    if low in ("desktop-gui", "server") or "desktop" in low or "win" in low or len(s) > 20:
+    if low in ("desktop-gui", "server", "this computer") or "desktop" in low or "win" in low or len(s) > 20:
         return "This computer"
+    if low.startswith("pc-") or "other computer" in low:
+        return "Other computer"
     if low.startswith(("phone-", "web-")) or "phone" in low:
         return "Your phone"
     if len(s) > 14:
