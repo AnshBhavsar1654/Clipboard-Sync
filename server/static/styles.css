@@ -1,7 +1,7 @@
 /*
    ClipBoardSync — interface styles
-   Follows DESIGN.md: a neutral dark surface, one indigo accent,
-   restrained radius, clean list-based history, vector icons, no emoji.
+   Follows DESIGN.md: neutral surface, one indigo accent, restrained
+   radius, clean list of shared clips, vector icons, plain language.
 */
 
 :root {
@@ -78,11 +78,11 @@ body {
 
 .app-container {
   width: 100%;
-  max-width: 520px;
+  max-width: 560px;
   padding: 24px 20px 80px;
   display: flex;
   flex-direction: column;
-  gap: 28px;
+  gap: 20px;
 }
 
 /* Header */
@@ -114,16 +114,16 @@ body {
 }
 
 .title-wrap h1 {
-  font-size: 1.05rem;
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  font-size: 1.1rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
   line-height: 1.2;
 }
 
 .subtitle {
-  font-size: 0.76rem;
-  color: var(--ink-faint);
-  font-weight: 400;
+  font-size: 0.78rem;
+  color: var(--ink-soft);
+  font-weight: 500;
   margin-top: 2px;
 }
 
@@ -142,8 +142,8 @@ body {
   position: static;
   top: auto;
   right: auto;
-  width: 30px;
-  height: 30px;
+  width: 36px;
+  height: 36px;
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--ink-soft);
@@ -154,7 +154,7 @@ body {
   border-color: var(--border-strong);
 }
 
-/* Pairing PIN screen */
+/* Pairing code screen */
 .auth-screen {
   display: flex;
   justify-content: center;
@@ -235,16 +235,17 @@ body {
 .badge {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  padding: 5px 11px;
+  gap: 8px;
+  padding: 7px 13px;
   border-radius: 20px;
-  font-size: 0.72rem;
-  font-weight: 500;
-  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  font-weight: 600;
+  font-family: var(--font-display);
   letter-spacing: 0.01em;
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--ink-soft);
+  white-space: nowrap;
 }
 
 .pulse-dot {
@@ -291,20 +292,19 @@ body {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 16px;
+  padding: 18px;
 }
 
 .panel-header {
-  margin-bottom: 12px;
+  margin-bottom: 14px;
 }
 
 .eyebrow {
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-  font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--ink-soft);
+  font-family: var(--font-display);
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  color: var(--ink);
 }
 
 .input-container {
@@ -317,13 +317,13 @@ textarea {
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  padding: 12px 40px 12px 12px;
+  padding: 14px 44px 14px 14px;
   color: var(--ink);
-  font-family: var(--font-mono);
-  font-size: 0.88rem;
+  font-family: var(--font-display);
+  font-size: 0.92rem;
   line-height: 1.55;
   resize: vertical;
-  min-height: 96px;
+  min-height: 104px;
   transition: border-color 0.15s ease;
 }
 
@@ -359,24 +359,26 @@ textarea::placeholder {
   color: var(--danger);
 }
 
-/* Buttons */
+/* Buttons — 44px touch targets, one primary action */
 .button-toolbar {
   display: flex;
   gap: 10px;
   justify-content: flex-end;
+  flex-wrap: wrap;
 }
 
 button {
   font-family: var(--font-display);
   font-weight: 600;
-  font-size: 0.86rem;
+  font-size: 0.88rem;
   border: none;
   border-radius: var(--radius-sm);
-  padding: 10px 16px;
+  padding: 12px 18px;
+  min-height: 44px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 7px;
+  gap: 8px;
   cursor: pointer;
   transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
@@ -409,14 +411,15 @@ button:active {
 /* Search */
 .feed-search {
   width: 100%;
-  margin-bottom: 16px;
-  background: var(--surface-raised);
+  margin-bottom: 14px;
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   color: var(--ink);
   font-family: var(--font-display);
-  font-size: 0.88rem;
-  padding: 10px 12px;
+  font-size: 0.9rem;
+  padding: 12px 14px;
+  min-height: 44px;
   transition: border-color 0.15s ease;
 }
 
@@ -467,39 +470,42 @@ button:active {
   text-decoration: underline;
 }
 
-/* Empty state */
+/* Empty state — inviting, with clear next step */
 .empty-state {
   text-align: left;
-  padding: 20px 16px;
-  border: 1px dashed var(--border);
+  padding: 24px 18px;
+  border: 1px dashed var(--border-strong);
   border-radius: var(--radius);
+  background: var(--surface);
 }
 
 .empty-title {
-  font-size: 0.88rem;
-  font-weight: 600;
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
   color: var(--ink);
-  margin-bottom: 4px;
+  margin-bottom: 6px;
 }
 
 .empty-body {
-  font-size: 0.82rem;
+  font-size: 0.86rem;
   color: var(--ink-soft);
-  max-width: 40ch;
+  max-width: 42ch;
+  line-height: 1.6;
 }
 
-/* Feed list — clean, separated rows */
+/* Shared clips — clean, separated rows with clear hierarchy */
 .feed-list {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
 }
 
 .clip-card {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 12px 14px;
+  padding: 14px 14px 12px;
 }
 
 .card-header {
@@ -508,23 +514,24 @@ button:active {
   justify-content: space-between;
   gap: 10px;
   margin-bottom: 10px;
-  font-family: var(--font-mono);
-  font-size: 0.74rem;
+  font-family: var(--font-display);
+  font-size: 0.76rem;
 }
 
 .clip-timestamp {
-  color: var(--ink-faint);
+  color: var(--ink-soft);
   flex-shrink: 0;
+  font-weight: 500;
 }
 
 .device-tag {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-weight: 500;
+  font-weight: 600;
+  font-size: 0.76rem;
   color: var(--ink-soft);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.01em;
 }
 
 .device-tag svg {
@@ -536,19 +543,19 @@ button:active {
 }
 
 .clip-content {
-  font-family: var(--font-mono);
-  font-size: 0.85rem;
-  line-height: 1.55;
+  font-family: var(--font-display);
+  font-size: 0.9rem;
+  line-height: 1.6;
   color: var(--ink);
   background: var(--bg);
   border: 1px solid var(--border);
-  padding: 10px 12px;
+  padding: 12px 14px;
   border-radius: var(--radius-sm);
   word-break: break-word;
   white-space: pre-wrap;
   max-height: 220px;
   overflow-y: auto;
-  margin-bottom: 10px;
+  margin-bottom: 12px;
 }
 
 .clip-content::-webkit-scrollbar {
@@ -566,17 +573,18 @@ button:active {
 }
 
 .copy-btn {
-  background: transparent;
-  color: var(--ink-soft);
-  border: 1px solid var(--border-strong);
-  padding: 6px 12px;
-  font-size: 0.78rem;
-  font-weight: 500;
+  background: var(--surface-raised);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  padding: 10px 16px;
+  min-height: 40px;
+  font-size: 0.82rem;
+  font-weight: 600;
 }
 
 .copy-btn:hover {
-  color: var(--ink);
-  border-color: var(--ink-faint);
+  border-color: var(--border-strong);
+  background: var(--bg);
 }
 
 .copy-btn.copied {

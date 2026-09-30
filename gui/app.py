@@ -107,7 +107,7 @@ logger = logging.getLogger("clipboardsync.gui")
 
 
 def get_local_lan_ip() -> str:
-    """Discover the primary IPv4 network LAN address for Wi-Fi pairing."""
+    """Discover the primary Wi-Fi address used to connect your phone."""
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("8.8.8.8", 80))
@@ -263,7 +263,7 @@ class QueueLogHandler(logging.Handler):
 
 
 class StdoutRedirector:
-    """Intercepts print statements across the app to stream seamlessly into the GUI console."""
+    """Intercepts print statements across the app to show them in the activity log."""
 
     def __init__(self, log_queue: queue.Queue[str], original_stdout: Any) -> None:
         self.log_queue = log_queue
@@ -273,7 +273,7 @@ class StdoutRedirector:
         if text.strip():
             for line in text.rstrip().split('\n'):
                 if line.strip():
-                    self.log_queue.put(f"[SYSOUT] {line}")
+                    self.log_queue.put(f"[Info] {line}")
         if self.original_stdout:
             self.original_stdout.write(text)
             self.original_stdout.flush()
@@ -367,7 +367,7 @@ class Tooltip:
 # ---------------------------------------------------------------------------
 
 class BackgroundEngine:
-    """Manages concurrent execution of Uvicorn WebSocket server and Win32 Clipboard sync client."""
+    """Runs the sharing server and clipboard watcher together in the background."""
 
     def __init__(self, port: int = 8000) -> None:
         self.port = port
@@ -406,7 +406,7 @@ class BackgroundEngine:
         try:
             self._loop.run_until_complete(self._async_runner(log_queue))
         except Exception as exc:
-            log_queue.put(f"[ERROR] Engine halted unexpectedly: {exc}")
+            log_queue.put(f"[Error] Sharing stopped unexpectedly: {exc}")
         finally:
             try:
                 self._loop.close()
@@ -415,7 +415,7 @@ class BackgroundEngine:
             self.is_running = False
 
     async def _async_runner(self, log_queue: queue.Queue[str]) -> None:
-        log_queue.put(f"[ENGINE] Launching ClipBoardSync Server on port {self.port}...")
+        log_queue.put(f"[Info] Starting sharing on port {self.port}...")
         uv_config = uvicorn.Config(
             app=fastapi_app,
             host="0.0.0.0",
@@ -428,13 +428,13 @@ class BackgroundEngine:
         server_task = asyncio.create_task(self._server.serve(), name="uvicorn-backend")
 
         await asyncio.sleep(0.4)
-        log_queue.put("[ENGINE] Connecting Win32 Desktop Clipboard Monitor...")
+        log_queue.put("[Info] Watching your clipboard for changes...")
         client_config = Config()
         client_config.websocket_url = f"ws://127.0.0.1:{self.port}/ws"
         self._client_app = ClipBoardSyncApp(client_config)
 
         client_task = asyncio.create_task(self._client_app.run(), name="win32-client")
-        log_queue.put("[ENGINE] Cross-device synchronization active and ready!")
+        log_queue.put("[Info] Sharing is on. Copy on either device to share it.")
 
         done, pending = await asyncio.wait(
             [server_task, client_task],
@@ -446,7 +446,7 @@ class BackgroundEngine:
                 await task
             except asyncio.CancelledError:
                 pass
-        log_queue.put("[ENGINE] Synchronization bridge cleanly shut down.")
+        log_queue.put("[Info] Sharing is off.")
 
 
 # ---------------------------------------------------------------------------
@@ -458,7 +458,7 @@ class ClipBoardSyncGUI(ctk.CTk):
 
     def __init__(self) -> None:
         super().__init__()
-        self.title("ClipBoardSync — Local Wi-Fi Clipboard Bridge")
+        self.title("ClipBoardSync — Share clipboard over Wi-Fi")
         self.geometry("1020x680")
         self.minsize(880, 560)
 
@@ -485,7 +485,7 @@ class ClipBoardSyncGUI(ctk.CTk):
         self._last_sig: tuple[tuple[str, ...], ...] = ()
         self.trust_store = get_store()
         self._last_pairing_sig: tuple[Any, ...] | None = None
-        self._log_lines: list[str] = ["=== ClipBoardSync engine initialized ==="]
+        self._log_lines: list[str] = ["ClipBoardSync is ready. Sharing starts automatically."]
 
         self.theme_name = self._load_theme_pref()
         _set_theme(self.theme_name)
@@ -526,7 +526,7 @@ class ClipBoardSyncGUI(ctk.CTk):
 
         sub = ctk.CTkLabel(
             self.sidebar,
-            text="Local Wi-Fi clipboard bridge",
+            text="Share clipboard over Wi-Fi",
             font=ctk.CTkFont(family=FONT, size=12),
             text_color=TEXT_FAINT,
             anchor="w",
@@ -535,12 +535,12 @@ class ClipBoardSyncGUI(ctk.CTk):
 
         self.status_badge = ctk.CTkLabel(
             self.sidebar,
-            text="● OFFLINE",
+            text="● NOT SHARING",
             font=ctk.CTkFont(family=FONT, size=12, weight="bold"),
             text_color=DANGER,
             fg_color=SURFACE_RAISED,
             corner_radius=RADIUS_CARD,
-            height=28,
+            height=30,
             anchor="w",
         )
         self.status_badge.grid(row=2, column=0, padx=16, pady=(0, 18), sticky="ew")
@@ -557,7 +557,7 @@ class ClipBoardSyncGUI(ctk.CTk):
 
         self.conn_label = ctk.CTkLabel(
             self.sidebar,
-            text="0 devices connected",
+            text="No phones connected",
             font=ctk.CTkFont(family=FONT, size=12),
             text_color=TEXT_FAINT,
             anchor="w",
@@ -566,10 +566,10 @@ class ClipBoardSyncGUI(ctk.CTk):
 
         self.toggle_engine_btn = ctk.CTkButton(
             self.sidebar,
-            text="START BRIDGE",
+            text="START SHARING",
             image=_make_icon("power", ON_ACCENT, 16),
             font=ctk.CTkFont(family=FONT, size=13, weight="bold"),
-            height=40,
+            height=42,
             corner_radius=RADIUS_SM,
             fg_color=PRIMARY,
             hover_color=PRIMARY_STRONG,
@@ -614,7 +614,7 @@ class ClipBoardSyncGUI(ctk.CTk):
             image=_make_icon(icon),
             anchor="w",
             font=ctk.CTkFont(family=FONT, size=14),
-            height=36,
+            height=38,
             corner_radius=RADIUS_SM,
             fg_color="transparent",
             hover_color=HOVER,
@@ -712,7 +712,7 @@ class ClipBoardSyncGUI(ctk.CTk):
         }.get(active_tab, self._show_clipboard)
         show_fn()
         self._replay_log_lines()
-        self.log_queue.put(f"[ACTION] Switched to {'light' if new_name == 'light' else 'dark'} theme.")
+        self.log_queue.put(f"[Info] Changed to {'light' if new_name == 'light' else 'dark'} theme.")
 
     def _replay_log_lines(self) -> None:
         try:
@@ -749,7 +749,7 @@ class ClipBoardSyncGUI(ctk.CTk):
         if with_search:
             self.search_entry = ctk.CTkEntry(
                 header,
-                placeholder_text="Search clips…  (Ctrl+K)",
+                placeholder_text="Search shared clips…  (Ctrl+K)",
                 height=34,
                 width=280,
                 corner_radius=RADIUS_SM,
@@ -799,28 +799,39 @@ class ClipBoardSyncGUI(ctk.CTk):
         if self._active_tab == "clipboard":
             items = self._apply_search(self._collect_items())
             self._render_item_list(self._clip_scroll, items, "No clips yet",
-                                   "Copy something on any connected device, or send from the Devices tab.")
+                                   "Copy something on this computer or your phone, or send a photo or file from Devices.",
+                                   action_text="Connect your phone" if not items else "",
+                                   action_command=self._show_devices)
         elif self._active_tab == "pinned":
             items = self._apply_search(self._collect_items(pinned_only=True))
             self._render_item_list(self._pinned_scroll, items, "Nothing pinned yet",
                                    "Use the pin button on any clip to keep it here.")
         elif self._active_tab == "files":
             items = self._apply_search(self._collect_items(files_only=True))
-            self._render_item_list(self._files_scroll, items, "No files or images yet",
-                                   "Sent files and images appear here.")
+            self._render_item_list(self._files_scroll, items, "No photos or files yet",
+                                   "Photos and files you share appear here.")
 
     def _render_item_list(self, scroll: ctk.CTkScrollableFrame, items: list[dict[str, Any]],
-                          empty_title: str, empty_body: str) -> None:
+                          empty_title: str, empty_body: str,
+                          action_text: str = "", action_command: Any = None) -> None:
         for child in scroll.winfo_children():
             child.destroy()
 
         if not items:
             e1 = ctk.CTkLabel(scroll, text=empty_title, font=ctk.CTkFont(family=FONT, size=15, weight="bold"),
                               text_color=TEXT, anchor="w")
-            e1.grid(row=0, column=0, pady=(56, 4), sticky="w")
+            e1.grid(row=0, column=0, pady=(48, 4), sticky="w", padx=(4, 0))
             e2 = ctk.CTkLabel(scroll, text=empty_body, font=ctk.CTkFont(family=FONT, size=13),
-                              text_color=TEXT_FAINT, justify="left", anchor="w", wraplength=430)
-            e2.grid(row=1, column=0, sticky="w")
+                              text_color=TEXT_SECONDARY, justify="left", anchor="w", wraplength=440)
+            e2.grid(row=1, column=0, sticky="w", padx=(4, 0))
+            if action_text and action_command:
+                act = ctk.CTkButton(
+                    scroll, text=action_text,
+                    font=ctk.CTkFont(family=FONT, size=12, weight="bold"),
+                    height=34, corner_radius=RADIUS_SM,
+                    fg_color=PRIMARY, hover_color=HOVER_PRIMARY, text_color=ON_ACCENT,
+                    command=action_command)
+                act.grid(row=2, column=0, sticky="w", pady=(14, 0), padx=(4, 0))
             return
 
         for idx, item in enumerate(items):
@@ -891,7 +902,7 @@ class ClipBoardSyncGUI(ctk.CTk):
             fg_color="transparent", hover_color=HOVER,
             command=lambda iid=item_id, it=item: self._toggle_pin(iid, it))
         pin_btn.grid(row=0, column=0, pady=(0, 6))
-        Tooltip(pin_btn, "Unpin" if is_pinned else "Pin to top")
+        Tooltip(pin_btn, "Remove pin" if is_pinned else "Keep at top")
 
         if itype == "file":
             file_url = str(item.get("file_url") or "")
@@ -903,7 +914,7 @@ class ClipBoardSyncGUI(ctk.CTk):
                 fg_color="transparent", hover_color=HOVER,
                 command=lambda u=file_url: webbrowser.open(u) if u else None)
             act_btn.grid(row=1, column=0)
-            Tooltip(act_btn, "Download file")
+            Tooltip(act_btn, "Save file")
         elif itype == "image":
             if content.startswith("data:image/"):
                 act_btn = ctk.CTkButton(
@@ -912,7 +923,7 @@ class ClipBoardSyncGUI(ctk.CTk):
                     fg_color="transparent", hover_color=HOVER,
                     command=lambda c=content: self.copy_image_to_local(c))
                 act_btn.grid(row=1, column=0)
-                Tooltip(act_btn, "Copy image to clipboard")
+                Tooltip(act_btn, "Copy photo — ready to paste")
             else:
                 img_url = str(item.get("file_url") or item.get("content") or "")
                 if img_url and not img_url.startswith("http"):
@@ -923,7 +934,7 @@ class ClipBoardSyncGUI(ctk.CTk):
                     fg_color="transparent", hover_color=HOVER,
                     command=lambda u=img_url: webbrowser.open(u) if u else None)
                 act_btn.grid(row=1, column=0)
-                Tooltip(act_btn, "Download image")
+                Tooltip(act_btn, "Save photo")
         else:
             act_btn = ctk.CTkButton(
                 actions, width=30, height=30, corner_radius=RADIUS_SM, text="",
@@ -931,7 +942,7 @@ class ClipBoardSyncGUI(ctk.CTk):
                 fg_color="transparent", hover_color=HOVER,
                 command=lambda c=content: self.copy_clip_to_local(c))
             act_btn.grid(row=1, column=0)
-            Tooltip(act_btn, "Copy to clipboard")
+            Tooltip(act_btn, "Copy — ready to paste")
 
     def _render_image_body(self, content_col: ctk.CTkFrame, content: str, item: dict[str, Any]) -> None:
         """Render an image thumbnail when base64 data is embedded, else a text descriptor."""
@@ -947,8 +958,8 @@ class ClipBoardSyncGUI(ctk.CTk):
                 return
         except Exception:
             pass
-        fname = item.get("filename") or "Image"
-        lbl = ctk.CTkLabel(content_col, text=f"Image  ·  {fname}",
+        fname = item.get("filename") or "Photo"
+        lbl = ctk.CTkLabel(content_col, text=f"Photo  ·  {fname}",
                            font=ctk.CTkFont(family=FONT, size=14), text_color=TEXT,
                            justify="left", anchor="w", wraplength=520)
         lbl.grid(row=1, column=0, pady=(8, 6), sticky="w")
@@ -990,7 +1001,7 @@ class ClipBoardSyncGUI(ctk.CTk):
         # QR card
         qr_card = ctk.CTkFrame(frame, fg_color=SURFACE, corner_radius=RADIUS_CARD)
         qr_card.grid(row=0, column=0, sticky="ns", padx=(0, 20))
-        title_qr = ctk.CTkLabel(qr_card, text="Pair your phone",
+        title_qr = ctk.CTkLabel(qr_card, text="Connect your phone",
                                 font=ctk.CTkFont(family=FONT, size=17, weight="bold"), text_color=TEXT)
         title_qr.pack(pady=(22, 14), padx=24)
 
@@ -998,7 +1009,7 @@ class ClipBoardSyncGUI(ctk.CTk):
         self.qr_label.pack(padx=24)
         self._generate_qr_image(self.mobile_url)
 
-        qr_note = ctk.CTkLabel(qr_card, text="Scan with your camera app\nto open the live portal",
+        qr_note = ctk.CTkLabel(qr_card, text="Point your phone camera at the code\nto open ClipBoardSync",
                                font=ctk.CTkFont(family=FONT, size=13), text_color=TEXT_FAINT)
         qr_note.pack(pady=(12, 24), padx=24)
 
@@ -1007,18 +1018,18 @@ class ClipBoardSyncGUI(ctk.CTk):
         details.grid(row=0, column=1, sticky="nsew")
         details.grid_columnconfigure(0, weight=1)
 
-        title_info = ctk.CTkLabel(details, text="Connect your devices",
+        title_info = ctk.CTkLabel(details, text="Share between computer and phone",
                                   font=ctk.CTkFont(family=FONT, size=19, weight="bold"),
                                   text_color=TEXT, anchor="w")
         title_info.grid(row=0, column=0, padx=26, pady=(26, 10), sticky="w")
 
         steps = (
-            "1. Same network\n"
-            "   Keep this computer and your phone on the same Wi-Fi or hotspot.\n\n"
-            "2. Scan the QR code\n"
-            "   Point your camera at the code on the left and open the link that appears.\n\n"
-            "3. Sync in real time\n"
-            "   Everything runs over your local network — no accounts, no cloud."
+            "1. Same Wi-Fi\n"
+            "   Keep this computer and your phone on the same Wi-Fi.\n\n"
+            "2. Scan the code\n"
+            "   Point your phone camera at the code on the left and open the link.\n\n"
+            "3. Share instantly\n"
+            "   Copy on either device. It appears on the other. Private — no accounts, no cloud."
         )
         instr = ctk.CTkLabel(details, text=steps, font=ctk.CTkFont(family=FONT, size=13),
                              text_color=TEXT_SECONDARY, justify="left", anchor="w")
@@ -1040,7 +1051,7 @@ class ClipBoardSyncGUI(ctk.CTk):
                                      command=self.copy_mobile_url)
         btn_copy_url.grid(row=0, column=1, padx=16, pady=12)
 
-        btn_open = ctk.CTkButton(details, text="Open portal on this PC", height=38,
+        btn_open = ctk.CTkButton(details, text="Open on this computer", height=38,
                                  corner_radius=RADIUS_SM, fg_color=SURFACE_RAISED,
                                  hover_color=HOVER, text_color=TEXT,
                                  font=ctk.CTkFont(family=FONT, size=13, weight="bold"),
@@ -1050,21 +1061,21 @@ class ClipBoardSyncGUI(ctk.CTk):
         btn_box = ctk.CTkFrame(details, fg_color="transparent")
         btn_box.grid(row=4, column=0, padx=26, pady=(0, 14), sticky="w")
 
-        btn_send_img = ctk.CTkButton(btn_box, text="Send image", image=_make_icon("image", ON_ACCENT, 15),
+        btn_send_img = ctk.CTkButton(btn_box, text="Send photo", image=_make_icon("image", ON_ACCENT, 15),
                                      font=ctk.CTkFont(family=FONT, size=13, weight="bold"),
-                                     height=34, corner_radius=RADIUS_SM, fg_color=PRIMARY_STRONG,
+                                     height=36, corner_radius=RADIUS_SM, fg_color=PRIMARY_STRONG,
                                      hover_color=HOVER_PRIMARY, text_color=ON_ACCENT,
                                      command=self.send_image_file)
         btn_send_img.grid(row=0, column=0, padx=(0, 12))
 
         btn_send_file = ctk.CTkButton(btn_box, text="Send file", image=_make_icon("folder", TEXT, 15),
                                       font=ctk.CTkFont(family=FONT, size=13, weight="bold"),
-                                      height=34, corner_radius=RADIUS_SM, fg_color=SURFACE_RAISED,
+                                      height=36, corner_radius=RADIUS_SM, fg_color=SURFACE_RAISED,
                                       hover_color=HOVER, text_color=TEXT,
                                       command=self.send_any_file)
         btn_send_file.grid(row=0, column=1)
 
-        self.conn_count_label = ctk.CTkLabel(details, text="0 devices connected",
+        self.conn_count_label = ctk.CTkLabel(details, text="No phones connected",
                                              font=ctk.CTkFont(family=FONT, size=14, weight="bold"),
                                              text_color=SUCCESS, anchor="w")
         self.conn_count_label.grid(row=5, column=0, padx=26, pady=(8, 22), sticky="w")
@@ -1073,14 +1084,14 @@ class ClipBoardSyncGUI(ctk.CTk):
         trust_card = ctk.CTkFrame(frame, fg_color=SURFACE, corner_radius=RADIUS_CARD)
         trust_card.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(20, 0))
 
-        t_head = ctk.CTkLabel(trust_card, text="Device pairing",
+        t_head = ctk.CTkLabel(trust_card, text="Phone access",
                               font=ctk.CTkFont(family=FONT, size=16, weight="bold"),
                               text_color=TEXT, anchor="w")
         t_head.pack(anchor="w", padx=20, pady=(16, 4))
 
         t_desc = ctk.CTkLabel(trust_card,
-                              text="New devices enter this PIN once and are remembered afterwards. "
-                                   "A phone that re-scans the QR code connects without being asked again.",
+                              text="Your phone enters this code once and stays connected afterwards. "
+                                   "If you scan the code again in the same phone browser, it connects without asking again.",
                               font=ctk.CTkFont(family=FONT, size=13), text_color=TEXT_SECONDARY,
                               justify="left", anchor="w", wraplength=860)
         t_desc.pack(anchor="w", padx=20, pady=(0, 12))
@@ -1089,7 +1100,7 @@ class ClipBoardSyncGUI(ctk.CTk):
         pin_row.pack(fill="x", padx=20, pady=(0, 10))
         pin_row.grid_columnconfigure(0, weight=1)
 
-        self.pin_policy_lbl = ctk.CTkLabel(pin_row, text="PAIRING PIN", font=ctk.CTkFont(family=MONO, size=11, weight="bold"),
+        self.pin_policy_lbl = ctk.CTkLabel(pin_row, text="PAIRING CODE", font=ctk.CTkFont(family=MONO, size=11, weight="bold"),
                                            text_color=TEXT_FAINT, anchor="w")
         self.pin_policy_lbl.grid(row=0, column=0, padx=18, pady=(10, 0), sticky="w")
 
@@ -1100,14 +1111,14 @@ class ClipBoardSyncGUI(ctk.CTk):
                                           text_color=PRIMARY, anchor="w")
         self.pin_value_lbl.grid(row=0, column=0, sticky="w")
 
-        btn_regenerate = ctk.CTkButton(pin_row, text="Regenerate PIN", width=130, height=32,
+        btn_regenerate = ctk.CTkButton(pin_row, text="New code", width=130, height=32,
                                        corner_radius=RADIUS_SM, fg_color=SURFACE_RAISED,
                                        hover_color=HOVER, text_color=TEXT,
                                        font=ctk.CTkFont(family=FONT, size=12, weight="bold"),
                                        command=self._regenerate_pin)
         btn_regenerate.grid(row=0, column=1, rowspan=2, padx=18, pady=12)
 
-        trusted_lbl = ctk.CTkLabel(trust_card, text="Paired devices",
+        trusted_lbl = ctk.CTkLabel(trust_card, text="Connected phones",
                                    font=ctk.CTkFont(family=FONT, size=13, weight="bold"),
                                    text_color=TEXT, anchor="w")
         trusted_lbl.pack(anchor="w", padx=20, pady=(0, 6))
@@ -1130,22 +1141,22 @@ class ClipBoardSyncGUI(ctk.CTk):
             self.qr_label.configure(image=ctk_img)
             self.qr_label.image = ctk_img
         except Exception as exc:
-            self.qr_label.configure(text=f"[QR Error: {exc}]", image=None)
+            self.qr_label.configure(text="Could not show the code. Copy the link below instead.", image=None)
 
     def _refresh_pairing_view(self) -> None:
-        """Refresh the pairing PIN label and the list of trusted devices."""
+        """Refresh the pairing code label and the list of connected phones."""
         if not hasattr(self, "pin_value_lbl"):
             return
         enabled = self.trust_store.require_pin
-        self.pin_value_lbl.configure(text=self.trust_store.pairing_pin if enabled else "— disabled —")
-        self.pin_policy_lbl.configure(text="PAIRING PIN" if enabled else "PAIRING PIN (DISABLED)")
+        self.pin_value_lbl.configure(text=self.trust_store.pairing_pin if enabled else "Not needed")
+        self.pin_policy_lbl.configure(text="PAIRING CODE" if enabled else "PAIRING CODE (TURNED OFF)")
 
         for child in self.trusted_scroll.winfo_children():
             child.destroy()
 
         devices = self.trust_store.trusted_devices()
         if not devices:
-            lbl = ctk.CTkLabel(self.trusted_scroll, text="No paired devices yet. Scan the QR code and enter the PIN once.",
+            lbl = ctk.CTkLabel(self.trusted_scroll, text="No phones connected yet. Scan the code and enter the pairing code once.",
                                font=ctk.CTkFont(family=FONT, size=13), text_color=TEXT_FAINT, anchor="w")
             lbl.grid(row=0, column=0, sticky="w", pady=4)
             return
@@ -1154,11 +1165,11 @@ class ClipBoardSyncGUI(ctk.CTk):
             row = ctk.CTkFrame(self.trusted_scroll, fg_color=SURFACE_RAISED, corner_radius=RADIUS_SM)
             row.grid(row=i, column=0, sticky="ew", pady=3)
             row.grid_columnconfigure(0, weight=1)
-            name_lbl = ctk.CTkLabel(row, text=_format_device(dev),
+            name_lbl = ctk.CTkLabel(row, text="Your phone",
                                     font=ctk.CTkFont(family=FONT, size=13), text_color=TEXT, anchor="w")
             name_lbl.grid(row=0, column=0, padx=12, pady=6, sticky="w")
-            btn_rm = ctk.CTkButton(row, text="Remove", width=72, height=26, corner_radius=RADIUS_SM,
-                                   fg_color=SURFACE_RAISED, hover_color=DANGER, text_color=TEXT_SECONDARY,
+            btn_rm = ctk.CTkButton(row, text="Remove", width=78, height=28, corner_radius=RADIUS_SM,
+                                   fg_color="transparent", hover_color=DANGER, text_color=TEXT_SECONDARY,
                                    font=ctk.CTkFont(family=FONT, size=11, weight="bold"),
                                    command=lambda d=dev: self._remove_device(d))
             btn_rm.grid(row=0, column=1, padx=8, pady=5)
@@ -1166,51 +1177,51 @@ class ClipBoardSyncGUI(ctk.CTk):
     def _regenerate_pin(self) -> None:
         pin = self.trust_store.regenerate_pin()
         self._refresh_pairing_view()
-        self.log_queue.put(f"[ACTION] Generated a new pairing PIN: {pin}")
+        self.log_queue.put(f"[Info] New pairing code created: {pin}")
 
     def _remove_device(self, device_id: str) -> None:
         self.trust_store.untrust(device_id)
         self._refresh_pairing_view()
-        self.log_queue.put(f"[ACTION] Removed paired device '{device_id}'.")
+        self.log_queue.put("[Info] Removed a connected phone. It will need the pairing code to connect again.")
 
     # ------------------------------------------------------------------
-    # Settings tab (bridge control + activity log + help)
+    # Settings tab (sharing control + activity log + help)
     # ------------------------------------------------------------------
     def _build_tab_settings(self) -> ctk.CTkFrame:
         frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
         frame.grid_columnconfigure(0, weight=1)
         frame.grid_rowconfigure(2, weight=1)
 
-        # Bridge control
+        # Sharing control
         sec1 = ctk.CTkFrame(frame, fg_color=SURFACE, corner_radius=RADIUS_CARD)
         sec1.grid(row=0, column=0, sticky="ew", pady=(0, 16))
         sec1.grid_columnconfigure(0, weight=1)
 
-        t1 = ctk.CTkLabel(sec1, text="Bridge", font=ctk.CTkFont(family=FONT, size=16, weight="bold"),
+        t1 = ctk.CTkLabel(sec1, text="Sharing", font=ctk.CTkFont(family=FONT, size=16, weight="bold"),
                           text_color=TEXT, anchor="w")
         t1.grid(row=0, column=0, padx=20, pady=(16, 4), sticky="w")
 
-        d1 = ctk.CTkLabel(sec1, text="Start or stop the local sync server. Both devices must be on the "
-                                     "same Wi-Fi network to pair.",
+        d1 = ctk.CTkLabel(sec1, text="Start or stop sharing with your phone. Both need to be on the "
+                                     "same Wi-Fi.",
                           font=ctk.CTkFont(family=FONT, size=13), text_color=TEXT_SECONDARY,
                           justify="left", anchor="w", wraplength=680)
         d1.grid(row=1, column=0, padx=20, pady=(0, 12), sticky="w")
 
         row = ctk.CTkFrame(sec1, fg_color="transparent")
         row.grid(row=2, column=0, padx=20, pady=(0, 18), sticky="w")
-        self.settings_toggle_btn = ctk.CTkButton(row, text="Start bridge",
+        self.settings_toggle_btn = ctk.CTkButton(row, text="Start sharing",
                                                  font=ctk.CTkFont(family=FONT, size=13, weight="bold"),
-                                                 height=36, corner_radius=RADIUS_SM, fg_color=PRIMARY,
+                                                 height=38, corner_radius=RADIUS_SM, fg_color=PRIMARY,
                                                  hover_color=PRIMARY_STRONG, text_color=ON_ACCENT,
                                                  command=self.toggle_engine)
         self.settings_toggle_btn.grid(row=0, column=0, padx=(0, 14))
-        self.settings_status_lbl = ctk.CTkLabel(row, text="Status: Offline",
-                                                font=ctk.CTkFont(family=MONO, size=12),
+        self.settings_status_lbl = ctk.CTkLabel(row, text="Status: Not sharing",
+                                                font=ctk.CTkFont(family=FONT, size=12),
                                                 text_color=TEXT_FAINT, anchor="w")
         self.settings_status_lbl.grid(row=0, column=1, sticky="w")
 
         self.require_pin_var = ctk.BooleanVar(value=self.trust_store.require_pin)
-        chk_pin = ctk.CTkCheckBox(sec1, text="Require PIN for new devices (first connection only)",
+        chk_pin = ctk.CTkCheckBox(sec1, text="Ask for a pairing code on new phones (only the first time)",
                                   variable=self.require_pin_var, command=self._toggle_require_pin,
                                   text_color=TEXT_SECONDARY, fg_color=PRIMARY_STRONG,
                                   hover_color=PRIMARY_STRONG, font=ctk.CTkFont(family=FONT, size=12))
@@ -1240,12 +1251,12 @@ class ClipBoardSyncGUI(ctk.CTk):
         btn_clear.grid(row=0, column=2)
 
         self.log_textbox = ctk.CTkTextbox(
-            sec2, height=170, corner_radius=RADIUS_SM, fg_color=BG, text_color=TEXT,
+            sec2, height=180, corner_radius=RADIUS_SM, fg_color=BG, text_color=TEXT,
             font=ctk.CTkFont(family=MONO, size=12), border_color=BORDER, border_width=1,
             wrap="word",
         )
         self.log_textbox.grid(row=1, column=0, padx=20, pady=(4, 20), sticky="ew")
-        self.log_textbox.insert("0.0", "=== ClipBoardSync engine initialized ===\n")
+        self.log_textbox.insert("0.0", "ClipBoardSync is ready. Sharing starts automatically.\n")
         self.log_textbox.configure(state="disabled")
 
         # Help
@@ -1258,13 +1269,13 @@ class ClipBoardSyncGUI(ctk.CTk):
         t3.grid(row=0, column=0, padx=20, pady=(16, 6), sticky="w")
 
         guide = (
-            "How it works — ClipBoardSync runs a local WebSocket server on your PC. Scanning the QR code opens a "
-            "live portal on your phone; text, images and files move across your Wi-Fi network only.\n\n"
-            "Phone can't load the page? Make sure both devices are on the exact same network and that Windows "
-            "Firewall allows ClipBoardSync on private networks (port 8000).\n\n"
-            "Does it sync both ways? Yes — copying on the PC appears on the phone, and copying from the phone "
-            "portal loads straight into your Windows clipboard (Ctrl+V).\n\n"
-            "Offline use? Yes — everything stays on your local router, so it works even without internet."
+            "How it works — ClipBoardSync shares your clipboard between this computer and your phone "
+            "over your Wi-Fi only. No accounts, no cloud.\n\n"
+            "Phone can't open the page? Make sure both are on the same Wi-Fi and allow ClipBoardSync "
+            "through Windows Firewall for private networks.\n\n"
+            "Does it work both ways? Yes — copy here and it appears on your phone. Send from your phone "
+            "and it is ready to paste here (Ctrl+V).\n\n"
+            "Do I need internet? No — it works on your home or hotspot Wi-Fi even when offline."
         )
         body = ctk.CTkLabel(sec3, text=guide, font=ctk.CTkFont(family=FONT, size=13),
                             text_color=TEXT_SECONDARY, justify="left", anchor="w", wraplength=760)
@@ -1279,16 +1290,16 @@ class ClipBoardSyncGUI(ctk.CTk):
         self.clipboard_clear()
         self.clipboard_append(self.mobile_url)
         self.update()
-        self.log_queue.put(f"[ACTION] Copied mobile pairing URL to desktop clipboard: {self.mobile_url}")
+        self.log_queue.put("[Info] Copied the phone link. Open it on your phone to connect.")
 
     def copy_clip_to_local(self, text: str) -> None:
         self.clipboard_clear()
         self.clipboard_append(text)
         self.update()
-        self.log_queue.put(f"[ACTION] Copied history item ({len(text)} chars) to Windows clipboard.")
+        self.log_queue.put("[Info] Copied to this computer. Ready to paste with Ctrl+V.")
 
     def copy_image_to_local(self, data_uri: str) -> None:
-        """Write base64 image data to the Windows clipboard as DIB."""
+        """Copy a shared photo to this computer so it can be pasted."""
         try:
             b64_str = data_uri.split(",", 1)[1] if "," in data_uri else data_uri
             raw = base64.b64decode(b64_str)
@@ -1303,14 +1314,14 @@ class ClipBoardSyncGUI(ctk.CTk):
                 win32clipboard.SetClipboardData(win32con.CF_DIB, dib_bytes)
             finally:
                 win32clipboard.CloseClipboard()
-            self.log_queue.put("[ACTION] Image copied directly to Windows clipboard (ready for Ctrl+V).")
+            self.log_queue.put("[Info] Photo copied. Ready to paste with Ctrl+V.")
         except Exception as exc:
-            self.log_queue.put(f"[ERROR] Failed to set image to Windows clipboard: {exc}")
+            self.log_queue.put(f"[Error] Could not copy the photo: {exc}")
 
     def send_image_file(self) -> None:
-        """Pick an image file from disk and broadcast across the local Wi-Fi bridge."""
+        """Let the user pick a photo on this computer and share it with the phone."""
         filepath = filedialog.askopenfilename(
-            title="Select Image to Send",
+            title="Choose a photo to share",
             filetypes=[("Images", "*.png;*.jpg;*.jpeg;*.gif;*.webp"), ("All Files", "*.*")]
         )
         if not filepath:
@@ -1328,7 +1339,7 @@ class ClipBoardSyncGUI(ctk.CTk):
 
             from server.models import ClipboardItem, get_utc_now_iso
             item = ClipboardItem(
-                device_id="Desktop-GUI",
+                device_id="This computer",
                 timestamp=get_utc_now_iso(),
                 type="image",
                 content=data_uri,
@@ -1336,14 +1347,14 @@ class ClipBoardSyncGUI(ctk.CTk):
                 filesize=len(raw),
             )
             self._broadcast_item(item.to_message_dict())
-            self.log_queue.put(f"[ACTION] Sent image '{path.name}' ({len(raw)} bytes) across the LAN bridge.")
+            self.log_queue.put(f"[Info] Shared photo '{path.name}' with your phone.")
             self._refresh_active_list()
         except Exception as exc:
-            self.log_queue.put(f"[ERROR] Failed to send image file: {exc}")
+            self.log_queue.put(f"[Error] Could not share the photo: {exc}")
 
     def send_any_file(self) -> None:
-        """Pick any file, upload it to the server, and broadcast across the bridge."""
-        filepath = filedialog.askopenfilename(title="Select File to Send")
+        """Let the user pick any file and share it with the phone."""
+        filepath = filedialog.askopenfilename(title="Choose a file to share")
         if not filepath:
             return
         try:
@@ -1356,7 +1367,7 @@ class ClipBoardSyncGUI(ctk.CTk):
 
             from server.models import ClipboardItem, get_utc_now_iso
             item = ClipboardItem(
-                device_id="Desktop-GUI",
+                device_id="This computer",
                 timestamp=get_utc_now_iso(),
                 type="file",
                 content=f"File: {Path(filepath).name}",
@@ -1365,10 +1376,10 @@ class ClipBoardSyncGUI(ctk.CTk):
                 file_url=f"/uploads/{safe_name}",
             )
             self._broadcast_item(item.to_message_dict())
-            self.log_queue.put(f"[ACTION] Sent file '{Path(filepath).name}' across the LAN bridge.")
+            self.log_queue.put(f"[Info] Shared file '{Path(filepath).name}' with your phone.")
             self._refresh_active_list()
         except Exception as exc:
-            self.log_queue.put(f"[ERROR] Failed to send file: {exc}")
+            self.log_queue.put(f"[Error] Could not share the file: {exc}")
 
     def _broadcast_item(self, message: dict[str, Any]) -> None:
         if self.engine._loop and self.engine._loop.is_running():
@@ -1406,24 +1417,31 @@ class ClipBoardSyncGUI(ctk.CTk):
         running = self.engine.is_running
         cnt = sync_hub.connection_count if running else 0
 
-        if running:
-            self.status_badge.configure(text="● ONLINE", text_color=SUCCESS)
-            self.settings_status_lbl.configure(text=f"Status: Online (port {self.port})", text_color=SUCCESS)
-            self.toggle_engine_btn.configure(text="STOP BRIDGE", fg_color=DANGER,
-                                             hover_color=DANGER_HOVER, text_color=ON_ACCENT)
-            self.settings_toggle_btn.configure(text="Stop bridge", fg_color=DANGER,
-                                               hover_color=DANGER_HOVER, text_color=ON_ACCENT)
-            self.conn_count_label.configure(text=f"{cnt} devices connected")
+        if cnt == 0:
+            conn_text = "No phones connected"
+        elif cnt == 1:
+            conn_text = "1 phone connected"
         else:
-            self.status_badge.configure(text="● OFFLINE", text_color=DANGER)
-            self.settings_status_lbl.configure(text="Status: Offline", text_color=TEXT_FAINT)
-            self.toggle_engine_btn.configure(text="START BRIDGE", fg_color=PRIMARY,
-                                             hover_color=PRIMARY_STRONG, text_color=ON_ACCENT)
-            self.settings_toggle_btn.configure(text="Start bridge", fg_color=PRIMARY,
-                                               hover_color=PRIMARY_STRONG, text_color=ON_ACCENT)
-            self.conn_count_label.configure(text="0 devices connected")
+            conn_text = f"{cnt} phones connected"
 
-        self.conn_label.configure(text=f"{cnt} devices connected")
+        if running:
+            self.status_badge.configure(text="● SHARING ON", text_color=SUCCESS)
+            self.settings_status_lbl.configure(text=f"Status: Sharing on · Port {self.port}", text_color=SUCCESS)
+            self.toggle_engine_btn.configure(text="STOP SHARING", fg_color=DANGER,
+                                             hover_color=DANGER_HOVER, text_color=ON_ACCENT)
+            self.settings_toggle_btn.configure(text="Stop sharing", fg_color=DANGER,
+                                               hover_color=DANGER_HOVER, text_color=ON_ACCENT)
+            self.conn_count_label.configure(text=conn_text)
+        else:
+            self.status_badge.configure(text="● NOT SHARING", text_color=DANGER)
+            self.settings_status_lbl.configure(text="Status: Not sharing", text_color=TEXT_FAINT)
+            self.toggle_engine_btn.configure(text="START SHARING", fg_color=PRIMARY,
+                                             hover_color=PRIMARY_STRONG, text_color=ON_ACCENT)
+            self.settings_toggle_btn.configure(text="Start sharing", fg_color=PRIMARY,
+                                               hover_color=PRIMARY_STRONG, text_color=ON_ACCENT)
+            self.conn_count_label.configure(text="No phones connected")
+
+        self.conn_label.configure(text=conn_text if running else "No phones connected")
 
         if self._active_tab == "devices":
             pair_sig = (
@@ -1445,29 +1463,29 @@ class ClipBoardSyncGUI(ctk.CTk):
         self.after(2000, self._poll_hub_status)
 
     def toggle_engine(self) -> None:
-        """Start or stop the backend synchronization bridge."""
+        """Start or stop sharing with connected phones."""
         if not self.engine.is_running:
             self.engine.start(self.log_queue)
-            self.status_badge.configure(text="● STARTING", text_color=WARNING)
-            self.settings_status_lbl.configure(text="Status: Starting…", text_color=WARNING)
+            self.status_badge.configure(text="◌ STARTING…", text_color=WARNING)
+            self.settings_status_lbl.configure(text="Status: Starting sharing…", text_color=WARNING)
         else:
             self.engine.stop()
-            self.status_badge.configure(text="● OFFLINE", text_color=DANGER)
+            self.status_badge.configure(text="● NOT SHARING", text_color=DANGER)
 
     def _toggle_require_pin(self) -> None:
         enabled = bool(self.require_pin_var.get())
         self.trust_store.require_pin = enabled
-        self.log_queue.put("[ACTION] PIN pairing " + ("enabled" if enabled else "disabled") + " for new devices.")
+        self.log_queue.put("[Info] Pairing code " + ("turned on for new phones." if enabled else "turned off. New phones can connect directly."))
         self._refresh_pairing_view()
 
     def clear_logs(self) -> None:
         self.log_textbox.configure(state="normal")
         self.log_textbox.delete("0.0", "end")
-        self.log_textbox.insert("0.0", "=== Log console cleared ===\n")
+        self.log_textbox.insert("0.0", "Activity log cleared.\n")
         self.log_textbox.configure(state="disabled")
 
     def on_close_request(self) -> None:
-        """Handle window termination cleanly."""
+        """Close the window and stop sharing cleanly."""
         if self.engine.is_running:
             self.engine.stop()
         sys.stdout = self.original_stdout
@@ -1484,14 +1502,31 @@ def _preview_text(text: str, limit: int = 280) -> str:
 def _format_time(iso_str: Any) -> str:
     try:
         dt = datetime.datetime.fromisoformat(str(iso_str))
-        return dt.strftime("%H:%M:%S")
+        now = datetime.datetime.now(dt.tzinfo) if dt.tzinfo else datetime.datetime.now()
+        diff = (now - dt).replace(tzinfo=None)
+        mins = int(diff.total_seconds() // 60)
+        if mins < 1:
+            return "Just now"
+        if mins < 60:
+            return f"{mins}m ago"
+        hours = mins // 60
+        if hours < 24:
+            return f"{hours}h ago"
+        return dt.strftime("%b %d, %H:%M")
     except Exception:
         return ""
 
 
 def _format_device(device_id: Any) -> str:
-    """Shorten a raw device identifier for display in list meta rows."""
-    s = str(device_id or "Unknown Device")
+    """Show a friendly device name instead of a technical ID."""
+    s = str(device_id or "").strip()
+    if not s or s.lower() == "unknown":
+        return "Unknown device"
+    low = s.lower()
+    if low in ("desktop-gui", "server") or "desktop" in low or "win" in low or len(s) > 20:
+        return "This computer"
+    if low.startswith(("phone-", "web-")) or "phone" in low:
+        return "Your phone"
     if len(s) > 14:
         return f"{s[:14]}…"
     return s

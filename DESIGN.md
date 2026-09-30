@@ -210,20 +210,81 @@ Close
 
 ## Devices & Sync
 
-Cross-device synchronization is the core differentiator.
+Cross-device sharing is the core differentiator. Use the word
+**Sharing** everywhere. Never use bridge, engine, backend, WebSocket,
+Win32, Uvicorn, LAN, subnet, portal, or peer in user-facing text.
 
-Always make the following states understandable:
+Always make the following states understandable with icon + text
+(never color alone):
 
 ```text
-● Connected
-◌ Syncing
-○ Offline
-! Sync Error
+● Sharing on
+◌ Connecting / Starting sharing…
+○ Not sharing
+! Couldn't share — Try again
 ```
 
-Never communicate important state through color alone.
+Show the source as `This computer` or `Your phone`, never as a raw
+device ID, UUID, Desktop-GUI, Win32, or server. Clip content stays more
+prominent than device and status meta.
 
-Show the source device and sync status without making them more prominent than the clipboard content.
+---
+
+## Voice & Tone
+
+Write for a non-technical person trying to share something quickly.
+
+* Plain verbs, sentence case, no filler. Example: `Start sharing`,
+  not `START BRIDGE`.
+* Active voice, one action per control. The button says `Start sharing`,
+  the toast says `Sharing is on`.
+* Name things by what users understand: `This computer`, `Your phone`,
+  `Pairing code`, `Same Wi-Fi`. Never expose how the system is built.
+* Errors explain what happened and how to fix it. They never apologize
+  excessively and are never vague.
+* Empty screens invite action with a next step and, where possible,
+  a button that goes there.
+
+Preferred terms:
+
+```text
+Start sharing / Stop sharing  (never Start/Stop bridge)
+Sharing on / Not sharing       (never Online/Offline bridge)
+Connect your phone             (never Pair your device to the bridge)
+Pairing code                   (6-digit code shown on the computer)
+Same Wi-Fi                     (never same subnet / LAN / local routing)
+Copy link / Open on this computer
+No phones connected / 1 phone connected
+```
+
+Avoid: bridge, engine, backend, WebSocket, Win32, Uvicorn, LAN bridge,
+SYSOUT, portal, peer, localhost, port (except `Port 8000` in small
+status detail where support needs it).
+
+---
+
+## Terminal Output
+
+Terminal output is plain text only: no emoji, no `[+] [*] [!]` markers,
+no ASCII banners. Use short sections and numbered steps.
+
+```text
+ClipBoardSync is running
+-------------------------
+Address: http://192.168.1.5:8000
+Pairing code: 482193 (enter once on your phone)
+
+How to connect:
+1. Join the same Wi-Fi on your computer and phone.
+2. Scan the code in the app, or open the address above on your phone.
+3. Copy on either device to share it.
+
+Press Ctrl+C to stop sharing.
+```
+
+Build scripts follow the same style: `Building ClipBoardSync...`,
+`Cleaning build/`, `Build complete: dist/ClipBoardSync.exe`,
+plus one next step on failure.
 
 ---
 
@@ -242,7 +303,7 @@ Errors should explain what happened and provide a recovery action.
 Example:
 
 ```text
-Couldn't synchronize with your phone.
+Couldn't share with your phone.
 
 The connection was interrupted.
 
@@ -252,9 +313,11 @@ The connection was interrupted.
 Use toasts for short-lived confirmations such as:
 
 ```text
-✓ Copied
-✓ Device connected
-✓ Sent to Phone
+Copied to clipboard
+Phone connected — ready to share
+Shared with your computer
+Photo shared
+File shared
 ```
 
 ---

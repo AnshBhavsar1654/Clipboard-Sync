@@ -141,7 +141,7 @@ class SyncHub:
         if failures >= MAX_AUTH_FAILURES:
             logger.warning("Device '%s' failed PIN %d times. Closing connection.", device_id, failures)
             await sender.send_json(
-                {"type": "auth_error", "message": "Too many failed attempts. Re-scan the QR code to try again."}
+                {"type": "auth_error", "message": "Too many tries. Open the code on your computer again to try again."}
             )
             try:
                 await sender.close(code=1013)
@@ -151,7 +151,7 @@ class SyncHub:
         else:
             remaining = MAX_AUTH_FAILURES - failures
             await sender.send_json(
-                {"type": "auth_error", "message": f"Incorrect PIN ({failures}/{MAX_AUTH_FAILURES} attempts, {remaining} left)"}
+                {"type": "auth_error", "message": f"That code did not match ({failures}/{MAX_AUTH_FAILURES} tries, {remaining} left)"}
             )
 
     # -- message handling --------------------------------------------------

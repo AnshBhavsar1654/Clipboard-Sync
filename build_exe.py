@@ -26,18 +26,18 @@ def _ensure_icon(root_dir: Path) -> Path | None:
                     format="ICO",
                     sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
                 )
-                print(f"[*] Generated application icon: {ico_file}")
+                print(f"Created app icon: {ico_file}")
             except Exception as exc:
-                print(f"[!] Could not generate icon from icon.png: {exc}")
+                print(f"Could not create app icon: {exc}")
 
     return ico_file if ico_file.exists() else None
 
 
 def main() -> None:
     """Run PyInstaller to compile ClipBoardSync Desktop Application."""
-    print("=" * 64)
-    print("   [+] BUILDING CLIPBOARDSYNC STANDALONE EXECUTABLE (.EXE) [+]")
-    print("=" * 64)
+    print("Building ClipBoardSync...")
+    print("Creating the standalone app file you can double-click to start sharing.")
+    print("-" * 64)
 
     root_dir = Path(__file__).parent.resolve()
     os.chdir(root_dir)
@@ -50,7 +50,7 @@ def main() -> None:
     for folder in ("build", "dist", "__pycache__"):
         path = root_dir / folder
         if path.exists():
-            print(f"[*] Removing legacy directory: {path}")
+            print(f"Cleaning: {path}")
             shutil.rmtree(path, ignore_errors=True)
 
     spec_file = root_dir / "ClipBoardSync.spec"
@@ -91,18 +91,18 @@ def main() -> None:
         "run_gui.py"
     ]
 
-    print(f"[*] Executing PyInstaller command:\n  {' '.join(pyinstaller_args)}\n")
+    print(f"Running: {' '.join(pyinstaller_args)}\n")
 
     result = subprocess.run(pyinstaller_args)
     if result.returncode == 0:
         exe_path = root_dir / "dist" / ("ClipBoardSync.exe" if sys.platform == "win32" else "ClipBoardSync")
-        print("\n" + "=" * 64)
-        print("   [SUCCESS] BUILD SUCCESSFUL! STANDALONE EXECUTABLE CREATED:")
-        print(f"   [Location]: {exe_path}")
-        print("=" * 64)
-        print("You can now share this compiled executable publicly for anyone to run without installing Python!")
+        print("")
+        print("Build complete.")
+        print(f"Your app is ready: {exe_path}")
+        print("Double-click it to start sharing. No Python setup needed.")
     else:
-        print("\n[!] Build failed. Please verify all dependencies (pyinstaller, customtkinter) are properly installed.")
+        print("")
+        print("Build did not complete. Check that Python, PyInstaller, and project dependencies are installed, then try again.")
         sys.exit(result.returncode)
 
 

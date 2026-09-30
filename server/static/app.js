@@ -68,7 +68,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 isConnecting = false;
                 reconnectDelay = 1000;
                 updateConnectionStatus("connecting");
-                showToast("Connected to ClipBoardSync Engine", "success");
+                showToast("Connected — ready to share", "success");
                 ws.send(JSON.stringify({ type: "auth_request", device_id: deviceId }));
             };
 
@@ -111,11 +111,11 @@ document.addEventListener("DOMContentLoaded", () => {
     function updateConnectionStatus(state) {
         connectionBadge.className = `badge ${state}`;
         if (state === "connected") {
-            statusText.textContent = "Live Bridge Connected";
+            statusText.textContent = "Sharing on";
         } else if (state === "connecting") {
-            statusText.textContent = "Connecting to Engine...";
+            statusText.textContent = "Connecting…";
         } else {
-            statusText.textContent = "Offline (Reconnecting)";
+            statusText.textContent = "Trying to reconnect…";
         }
     }
 
@@ -128,7 +128,7 @@ document.addEventListener("DOMContentLoaded", () => {
         }
         if (msg.type === "auth_error") {
             updateConnectionStatus("connecting");
-            showPinError(msg.message || "Incorrect PIN. Try again.");
+            showPinError(msg.message || "That code did not match. Try again.");
             return;
         }
         if (msg.type === "auth_success") {
@@ -153,7 +153,7 @@ document.addEventListener("DOMContentLoaded", () => {
             applyFilter();
 
             if (msg.device_id !== deviceId) {
-                const label = msg.type === "image" ? "New Image" : (msg.type === "file" ? "New File" : "New Clip");
+                const label = msg.type === "image" ? "New photo" : (msg.type === "file" ? "New file" : "New clip");
                 showToast(`${label} from ${formatDeviceName(msg.device_id)}`, "info");
             }
         }
@@ -162,7 +162,7 @@ document.addEventListener("DOMContentLoaded", () => {
     async function uploadAndTransmitFile(file) {
         if (!file) return;
 
-        showToast(`Uploading ${file.name}...`, "info");
+        showToast(`Sharing ${file.name}…`, "info");
 
         try {
             const formData = new FormData();
@@ -181,7 +181,7 @@ document.addEventListener("DOMContentLoaded", () => {
             const itemType = data.type || "file";
 
             if (!ws || ws.readyState !== WebSocket.OPEN) {
-                showToast("Uploaded, but bridge is offline!", "info");
+                showToast("Shared on this phone, but sharing is offline.", "info");
                 return;
             }
 
@@ -199,10 +199,10 @@ document.addEventListener("DOMContentLoaded", () => {
             feedItems.unshift(payload);
             itemCounter.textContent = `${feedItems.length} ${feedItems.length === 1 ? "item" : "items"}`;
             applyFilter();
-            showToast(`Transmitted ${data.filename} to Computer!`, "success");
+            showToast(`Shared ${data.filename} with your computer`, "success");
         } catch (err) {
             console.error("Upload failed:", err);
-            showToast("Failed to upload file to computer", "info");
+            showToast("Could not share that file. Try again.", "info");
         }
     }
 
@@ -210,7 +210,7 @@ document.addEventListener("DOMContentLoaded", () => {
         if (!text || !text.trim()) return;
 
         if (!ws || ws.readyState !== WebSocket.OPEN) {
-            showToast("Cannot send: Bridge disconnected!", "info");
+            showToast("Sharing is offline. Try again in a moment.", "info");
             return;
         }
 
@@ -227,7 +227,7 @@ document.addEventListener("DOMContentLoaded", () => {
         feedItems.unshift(payload);
         itemCounter.textContent = `${feedItems.length} ${feedItems.length === 1 ? "item" : "items"}`;
         applyFilter();
-        showToast("Transmitted to your Computer!", "success");
+        showToast("Shared with your computer", "success");
     }
 
     // Search / Filter
@@ -280,17 +280,17 @@ document.addEventListener("DOMContentLoaded", () => {
             const imgSrc = item.content && item.content.startsWith("data:image/") ? item.content : (item.file_url || item.content);
             bodyHtml = `
                 <div class="card-media-wrap">
-                    <img src="${imgSrc}" class="card-image-preview" alt="Synced Screenshot" />
+                    <img src="${imgSrc}" class="card-image-preview" alt="Shared photo" />
                 </div>
             `;
             actionBtnHtml = `
-                <a href="${imgSrc}" download="${item.filename || "synced_image.png"}" class="copy-btn link-btn" target="_blank" rel="noopener">
+                <a href="${imgSrc}" download="${item.filename || "shared_photo.png"}" class="copy-btn link-btn" target="_blank" rel="noopener">
                     <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none">
                         <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
                         <polyline points="7 10 12 15 17 10"></polyline>
                         <line x1="12" y1="15" x2="12" y2="3"></line>
                     </svg>
-                    <span>Download Image</span>
+                    <span>Save photo</span>
                 </a>
             `;
         } else if (itemType === "file") {
@@ -317,7 +317,7 @@ document.addEventListener("DOMContentLoaded", () => {
                         <polyline points="7 10 12 15 17 10"></polyline>
                         <line x1="12" y1="15" x2="12" y2="3"></line>
                     </svg>
-                    <span>Download File</span>
+                    <span>Save file</span>
                 </a>
             `;
         } else {
@@ -328,7 +328,7 @@ document.addEventListener("DOMContentLoaded", () => {
                         <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
                         <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
                     </svg>
-                    <span>Copy to Phone</span>
+                    <span>Copy</span>
                 </button>
             `;
         }
@@ -375,8 +375,8 @@ document.addEventListener("DOMContentLoaded", () => {
             const span = btn.querySelector("span");
             const originalText = span.textContent;
             btn.classList.add("copied");
-            span.textContent = "✓ Copied!";
-            showToast("Copied directly to your phone clipboard!", "success");
+            span.textContent = "Copied";
+            showToast("Copied to this phone", "success");
 
             setTimeout(() => {
                 btn.classList.remove("copied");
@@ -384,22 +384,22 @@ document.addEventListener("DOMContentLoaded", () => {
             }, 2500);
         } catch (err) {
             console.error("Copy failed:", err);
-            showToast("Could not copy automatically. Please hold to copy.", "info");
+            showToast("Could not copy. Touch and hold the text to copy it.", "info");
         }
     }
 
     function updateEmptyState(query, count) {
         if (count === 0 && !query) {
             emptyState.style.display = "flex";
-            emptyState.querySelector(".empty-title").textContent = "Nothing sent yet";
+            emptyState.querySelector(".empty-title").textContent = "Nothing shared yet";
             emptyState.querySelector(".empty-body").textContent =
-                "Copy something on your computer, or send text above — it will appear here right away.";
+                "Copy something on your computer, or share text above — it will appear here right away.";
             clipboardList.style.display = "none";
         } else if (count === 0 && query) {
             emptyState.style.display = "flex";
             emptyState.querySelector(".empty-title").textContent = "No matches";
             emptyState.querySelector(".empty-body").textContent =
-                `Nothing matched “${query}”. Try a different search.`;
+                `Nothing matched for that search. Try different words.`;
             clipboardList.style.display = "none";
         } else {
             emptyState.style.display = "none";
@@ -457,11 +457,11 @@ document.addEventListener("DOMContentLoaded", () => {
     function submitPin() {
         const pin = pinInput.value.replace(/\D/g, "").slice(0, 6);
         if (pin.length !== 6) {
-            showPinError("Enter the 6-digit PIN shown on your computer.");
+            showPinError("Enter the 6-digit code shown on your computer.");
             return;
         }
         if (!ws || ws.readyState !== WebSocket.OPEN) {
-            showPinError("Bridge is offline. Reconnecting\u2026");
+            showPinError("Sharing is offline. Trying to reconnect…");
             return;
         }
         clearPinError();
@@ -517,7 +517,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const next = currentTheme() === "dark" ? "light" : "dark";
         localStorage.setItem("clipboardsync_theme", next);
         applyTheme(next);
-        showToast(next === "light" ? "Light theme enabled" : "Dark theme enabled", "info");
+        showToast(next === "light" ? "Light theme on" : "Dark theme on", "info");
     });
 
     document.addEventListener("keydown", (e) => {
@@ -551,7 +551,7 @@ document.addEventListener("DOMContentLoaded", () => {
     sendBtn.addEventListener("click", () => {
         const text = sendInput.value;
         if (!text.trim()) {
-            showToast("Please enter text or choose an image/file first", "info");
+            showToast("Type something first, or choose a photo or file", "info");
             return;
         }
         transmitClipboard(text);
@@ -579,15 +579,15 @@ document.addEventListener("DOMContentLoaded", () => {
                     transmitClipboard(clipText);
                     sendInput.value = "";
                 } else {
-                    showToast("Your phone clipboard is currently empty", "info");
+                    showToast("Your phone clipboard is empty", "info");
                 }
             } else {
-                showToast("Please tap inside the box above and select 'Paste'", "info");
+                showToast("Tap the box above, then tap Paste", "info");
                 sendInput.focus();
             }
         } catch (err) {
             console.warn("Clipboard read permission denied or unsupported:", err);
-            showToast("Please paste manually into the text box above", "info");
+            showToast("Paste your text into the box above", "info");
             sendInput.focus();
         }
     });
@@ -601,7 +601,7 @@ document.addEventListener("DOMContentLoaded", () => {
         feedItems = [];
         itemCounter.textContent = "0 items";
         applyFilter();
-        showToast("Cleared view on this device", "info");
+        showToast("Cleared this view. Shared clips stay on your computer.", "info");
     });
 
     // Handle Ctrl+Enter in textarea
@@ -623,12 +623,12 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     function formatDeviceName(id) {
-        if (!id) return "Connected Device";
-        if (id === deviceId) return "This Phone (You)";
-        if (id.startsWith("Phone-") || id.startsWith("Web-")) return `Phone (${id.slice(-5)})`;
-        if (id === "server") return "Sync Engine";
-        // Likely Windows UUID or Desktop computer
-        return `Windows Computer (${id.substring(0, 8)})`;
+        if (!id) return "Shared clip";
+        if (id === deviceId) return "This phone";
+        if (id.startsWith("Phone-") || id.startsWith("Web-")) return "Your phone";
+        if (id === "server") return "ClipBoardSync";
+        // Likely this computer
+        return "This computer";
     }
 
     function formatTime(isoStr) {

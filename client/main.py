@@ -44,9 +44,9 @@ class ClipBoardSyncApp:
     async def run(self) -> None:
         """Run until a shutdown signal is received."""
         logger.info("Starting ClipBoardSync client (device_id=%s)", self._config.device_id)
-        print(f"Device ID: {self._config.device_id}")
-        print(f"Backend:   {self._config.websocket_url}")
-        print("Monitoring clipboard. Press Ctrl+C to stop.\n")
+        print(f"Sharing as: {self._config.device_id}")
+        print(f"Sharing with: {self._config.websocket_url}")
+        print("Watching your clipboard. Copy anything to share it. Press Ctrl+C to stop.\n")
 
         self._clipboard.start()
         await self._websocket.start()
@@ -142,13 +142,13 @@ class ClipBoardSyncApp:
         content = message.get("content")
         if content_type == "image" and isinstance(content, str) and content.startswith("data:image/"):
             logger.info("Applying remote clipboard image update from device %s", source_device)
-            print(f"[REMOTE IMAGE] From {source_device}")
+            print(f"New photo shared — copied to your clipboard.")
             self._clipboard.set_image_from_base64(content)
             return
 
         if content_type == "text" and isinstance(content, str):
             logger.info("Applying remote clipboard text update from device %s", source_device)
-            print(f"[REMOTE TEXT] From {source_device}: {content!r}")
+            print(f"New text shared — copied to your clipboard.")
             self._clipboard.set_text(content)
             return
 
@@ -175,7 +175,7 @@ async def _async_main() -> None:
 def main() -> None:
     """CLI entry point."""
     if sys.platform != "win32":
-        print("This client currently supports Windows only.", file=sys.stderr)
+        print("ClipBoardSync clipboard sharing needs Windows for this mode.", file=sys.stderr)
         sys.exit(1)
 
     try:

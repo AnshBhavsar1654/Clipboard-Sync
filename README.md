@@ -1,34 +1,33 @@
 # ClipBoardSync
 
-**Real-time cross-device clipboard bridge over your local Wi-Fi.** Share text, images, and files between a Windows PC and any phone — no cloud, no accounts, no phone apps.
+**Share your clipboard between a Windows PC and any phone over your Wi-Fi.** Share text, photos, and files — no cloud, no accounts, no phone apps.
 
 ```
-[ Windows PC ]  ⇄  [ Phone / Tablet ]
-  clipboard +      WebSocket over     standard browser
-  web hub (8000)   your Wi-Fi         dashboard + QR
+[ This computer ]  ⇄  [ Your phone ]
+  sharing app          same Wi-Fi      browser + QR code
 ```
 
 ---
 
 ## Features
 
-- **Zero-setup phone pairing** — scan the QR code with your camera to open the live dashboard in any mobile browser.
-- **Bidirectional sync** — copy on the PC and it appears on the phone; copy on the phone and it lands in your Windows clipboard (`Ctrl+V`).
-- **Text, images, and files** — send any of them in either direction across the LAN.
-- **Searchable, pinnable history** — the desktop app keeps a clean clipboard feed with live search (`Ctrl+K`), pinning, and a dedicated Files view.
-- **100% local & private** — everything stays on your Wi-Fi router; works fully offline.
-- **Polished desktop GUI** — dark CustomTkinter interface with QR pairing, connected-device counter, and a live activity log.
-- **One-click executable** — a single self-contained `.exe` for non-technical users.
+- **Easy phone connection** — scan the code with your phone camera to open ClipBoardSync in any mobile browser.
+- **Works both ways** — copy on the computer and it appears on the phone; share from the phone and it is ready to paste on the computer (`Ctrl+V`).
+- **Text, photos, and files** — share any of them in either direction.
+- **Searchable, pinnable history** — the desktop app keeps a clean feed with live search (`Ctrl+K`), pinning, and a dedicated Files view.
+- **100% local & private** — everything stays on your Wi-Fi; works fully offline.
+- **Simple desktop app** — light and dark themes, QR code connection, phone counter, and a clear activity log.
+- **One-click app** — a single `ClipBoardSync.exe` anyone can double-click.
 
 ---
 
 ## Quick Start (end users)
 
 1. Download `ClipBoardSync.exe` from the Releases page.
-2. Double-click to launch — the bridge starts automatically.
-3. Connect your phone and PC to the **same Wi-Fi network**.
-4. Point your phone camera at the QR code and open the link.
-5. Copy on either device and watch it sync.
+2. Double-click to launch — sharing starts automatically.
+3. Join the **same Wi-Fi** on your computer and phone.
+4. Point your phone camera at the code in the app and open the link.
+5. Enter the 6-digit code once. Then copy on either device to share it.
 
 ---
 
@@ -84,11 +83,11 @@ ClipBoardSync/
 
 ### Design
 
-The interface follows `DESIGN.md`: a neutral dark palette with a single indigo accent, vector icons (no emoji), restrained radius, clean list-based clipboard history, and keyboard-first search. Any UI changes must respect it.
+The interface follows `DESIGN.md`: a neutral palette with a single indigo accent, vector icons, restrained radius, clean list of shared clips, and keyboard-first search. Use plain `Sharing` language — never bridge, engine, or backend in user-facing text. Any UI changes must respect it.
 
 ---
 
 ## Troubleshooting
 
-- **Phone can't open the QR link** — confirm both devices are on the same Wi-Fi subnet and allow ClipBoardSync through Windows Firewall for private networks (port 8000).
-- **Requires internet?** No. The bridge runs entirely on local network routing.
+- **Phone can't open the link** — make sure the computer and phone are on the same Wi-Fi and allow ClipBoardSync through Windows Firewall for private networks.
+- **Do I need internet?** No. Sharing runs on your Wi-Fi only and works offline.

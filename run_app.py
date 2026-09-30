@@ -34,22 +34,23 @@ def get_local_lan_ip() -> str:
 
 
 def print_pairing_instructions(port: int) -> None:
-    """Render terminal QR code and mobile connection guidance."""
+    """Render connection details and steps for sharing with a phone."""
     ip = get_local_lan_ip()
     mobile_url = f"http://{ip}:{port}"
     store = get_store()
     pin = store.pairing_pin if store.require_pin else "disabled"
 
-    print("\n" + "=" * 62)
-    print("    🚀 CLIPBOARDSYNC CROSS-DEVICE BRIDGE RUNNING 🚀")
-    print("=" * 62)
-    print(f"📱 MOBILE CONNECTION URL:  {mobile_url}")
-    print("   Make sure your phone is connected to the same Wi-Fi network!")
+    print("")
+    print("ClipBoardSync is running")
+    print("-" * 62)
+    print(f"Address:      {mobile_url}")
     if store.require_pin:
-        print(f"🔐 PAIRING PIN:            {pin}")
-        print("   New devices must enter this PIN once; paired devices are remembered.")
-    print("   Open your camera app and scan this QR Code to launch:")
-    print("=" * 62)
+        print(f"Pairing code: {pin} (enter once on your phone)")
+    print("")
+    print("How to connect:")
+    print("1. Join the same Wi-Fi on your computer and phone.")
+    print("2. Open the address above on your phone, or scan this code:")
+    print("-" * 62)
 
     try:
         qr = qrcode.QRCode(
@@ -64,9 +65,12 @@ def print_pairing_instructions(port: int) -> None:
         qr.print_ascii(invert=True)
     except Exception as exc:
         logger.debug("Could not render QR code in terminal: %s", exc)
-        print(f" [!] Navigate directly to {mobile_url} on your mobile browser.")
+        print(f"Open {mobile_url} directly in your phone browser.")
 
-    print("=" * 62 + "\n")
+    print("-" * 62)
+    print("Copy on either device to share it.")
+    print("Press Ctrl+C to stop sharing.")
+    print("")
 
 
 async def async_run_all(port: int = 8000) -> None:
@@ -117,12 +121,12 @@ async def async_run_all(port: int = 8000) -> None:
 def main() -> None:
     """CLI launcher entrypoint."""
     if sys.platform != "win32":
-        print("Note: Native clipboard client functions fully on Windows. Server is platform-independent.", file=sys.stderr)
+        print("ClipBoardSync works best on Windows for clipboard sharing.", file=sys.stderr)
     
     try:
         asyncio.run(async_run_all())
     except KeyboardInterrupt:
-        print("\n[+] Shutting down ClipBoardSync seamlessly. Goodbye!")
+        print("\nStopping sharing. Goodbye!")
 
 
 if __name__ == "__main__":

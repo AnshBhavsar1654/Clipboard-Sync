@@ -4,9 +4,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ClipBoardSync — Local Clipboard Bridge</title>
+    <title>ClipBoardSync — Share clipboard over Wi-Fi</title>
     <meta name="description"
-        content="Send text and links between your phone and computer instantly over your local Wi-Fi network. No cloud, no accounts.">
+        content="Share text, photos, and files between your phone and computer over your Wi-Fi. No cloud, no accounts.">
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -44,7 +44,7 @@
                 </div>
                 <div class="title-wrap">
                     <h1 id="page-title">ClipBoardSync</h1>
-                    <p class="subtitle">Local network &middot; no cloud</p>
+                    <p class="subtitle">Private Wi-Fi sharing</p>
                 </div>
             </div>
 
@@ -65,7 +65,7 @@
             </div>
         </header>
 
-        <!-- Pairing PIN screen (new devices only) -->
+        <!-- Pairing code screen (new phones only) -->
         <section id="auth-screen" class="auth-screen" hidden>
             <div class="panel auth-card">
                 <div class="auth-icon" aria-hidden="true">
@@ -75,14 +75,14 @@
                         <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
                     </svg>
                 </div>
-                <h2 class="auth-title">Pair this device</h2>
-                <p class="auth-body">Enter the 6-digit PIN shown in the ClipBoardSync app on your computer. This is only
-                    needed once &mdash; this device will be remembered next time.</p>
+                <h2 class="auth-title">Connect this phone</h2>
+                <p class="auth-body">Enter the 6-digit code shown in the ClipBoardSync app on your computer. You only
+                    need to do this once &mdash; this phone will stay connected.</p>
                 <input id="pin-input" class="pin-input" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6"
                     autocomplete="one-time-code" placeholder="&middot;&middot;&middot;&middot;&middot;&middot;"
-                    aria-label="Pairing PIN">
+                    aria-label="Pairing code">
                 <button id="pin-submit" class="primary-btn pin-submit">
-                    <span>Verify PIN</span>
+                    <span>Connect</span>
                     <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2.2" fill="none"
                         stroke-linecap="round" stroke-linejoin="round">
                         <polyline points="20 6 9 17 4 12"></polyline>
@@ -95,12 +95,12 @@
         <div id="app-body">
         <section id="send-section" class="panel" aria-labelledby="send-title">
             <div class="panel-header">
-                <h2 id="send-title" class="eyebrow">Send to computer</h2>
+                <h2 id="send-title" class="eyebrow">Share with this computer</h2>
             </div>
 
             <div class="input-container">
-                <textarea id="send-input" placeholder="Type or paste text to send to your computer&hellip;" rows="4"
-                    aria-label="Text to send to your computer"></textarea>
+                <textarea id="send-input" placeholder="Type or paste to share with your computer&hellip;" rows="4"
+                    aria-label="Text to share with your computer"></textarea>
                 <button id="clear-btn" class="icon-btn" title="Clear text" aria-label="Clear input">
                     <svg viewBox="0 0 24 24" width="15" height="15" stroke="currentColor" stroke-width="2" fill="none"
                         stroke-linecap="round">
@@ -125,16 +125,16 @@
                     Paste
                 </button>
 
-                <button id="upload-img-btn" class="secondary-btn" title="Send Image to computer">
+                <button id="upload-img-btn" class="secondary-btn" title="Share a photo with your computer">
                     <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="1.8" fill="none">
                         <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
                         <circle cx="8.5" cy="8.5" r="1.5"></circle>
                         <polyline points="21 15 16 10 5 21"></polyline>
                     </svg>
-                    Image
+                    Photo
                 </button>
 
-                <button id="upload-file-btn" class="secondary-btn" title="Send File to computer">
+                <button id="upload-file-btn" class="secondary-btn" title="Share a file with your computer">
                     <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="1.8" fill="none">
                         <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path>
                         <polyline points="13 2 13 9 20 9"></polyline>
@@ -143,7 +143,7 @@
                 </button>
 
                 <button id="send-btn" class="primary-btn">
-                    <span>Send</span>
+                    <span>Share</span>
                     <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2.2" fill="none"
                         stroke-linecap="round" stroke-linejoin="round">
                         <line x1="5" y1="12" x2="19" y2="12"></line>
@@ -153,23 +153,23 @@
             </div>
         </section>
 
-        <!-- Live feed -->
+        <!-- Shared clips -->
         <section id="feed-section" class="feed-section" aria-labelledby="feed-title">
             <div class="feed-header">
                 <div class="feed-header-left">
-                    <h2 id="feed-title" class="eyebrow">Live feed</h2>
+                    <h2 id="feed-title" class="eyebrow">Shared clips</h2>
                     <span id="item-counter" class="counter">0 items</span>
                 </div>
-                <button id="clear-feed-btn" class="text-btn" title="Clear visible items">Clear</button>
+                <button id="clear-feed-btn" class="text-btn" title="Clear items shown here">Clear</button>
             </div>
 
-            <input id="feed-search" class="feed-search" type="search" placeholder="Search clips (Ctrl+K)"
-                aria-label="Search clipboard history" autocomplete="off">
+            <input id="feed-search" class="feed-search" type="search" placeholder="Search shared clips"
+                aria-label="Search shared clips" autocomplete="off">
 
             <!-- Empty state -->
             <div id="empty-state" class="empty-state">
-                <p class="empty-title">Nothing sent yet</p>
-                <p class="empty-body">Copy something on your computer, or send text above &mdash; it will appear here
+                <p class="empty-title">Nothing shared yet</p>
+                <p class="empty-body">Copy something on your computer, or share text above &mdash; it will appear here
                     right away.</p>
             </div>
 

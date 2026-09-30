@@ -10,7 +10,7 @@ from gui.app import ClipBoardSyncGUI
 def main() -> None:
     """Initialize and run the ClipBoardSync CustomTkinter application window."""
     if sys.platform != "win32":
-        print("Note: Windows Desktop GUI is designed natively for win32 clipboard integration.", file=sys.stderr)
+        print("ClipBoardSync desktop sharing is designed for Windows.", file=sys.stderr)
 
     logging.basicConfig(
         level=logging.INFO,
@@ -22,9 +22,9 @@ def main() -> None:
     try:
         app.mainloop()
     except KeyboardInterrupt:
-        print("Application terminated by keyboard signal.")
+        print("ClipBoardSync was closed.")
     except Exception as exc:
-        print(f"Error executing application loop: {exc}")
+        print(f"ClipBoardSync could not start the window: {exc}")
 
 
 if __name__ == "__main__":
