@@ -14,8 +14,14 @@ document.addEventListener("DOMContentLoaded", () => {
     const pasteAndSendBtn = document.getElementById("paste-and-send-btn");
     const uploadImgBtn = document.getElementById("upload-img-btn");
     const uploadFileBtn = document.getElementById("upload-file-btn");
+    const uploadFolderBtn = document.getElementById("upload-folder-btn");
     const fileInput = document.getElementById("file-input");
     const imageInput = document.getElementById("image-input");
+    const folderInput = document.getElementById("folder-input");
+    const uploadProgress = document.getElementById("upload-progress");
+    const uploadProgressBar = document.getElementById("upload-progress-bar");
+    const uploadProgressText = document.getElementById("upload-progress-text");
+    const uploadProgressPct = document.getElementById("upload-progress-pct");
     const clearBtn = document.getElementById("clear-btn");
     const clearFeedBtn = document.getElementById("clear-feed-btn");
     const clipboardList = document.getElementById("clipboard-list");
@@ -147,38 +153,186 @@ document.addEventListener("DOMContentLoaded", () => {
             feedItems = msg.items.slice().reverse(); // newest first
             itemCounter.textContent = `${feedItems.length} ${feedItems.length === 1 ? "item" : "items"}`;
             applyFilter();
-        } else if ((msg.type === "text" || msg.type === "image" || msg.type === "file") && (msg.content || msg.file_url)) {
+        } else if ((msg.type === "text" || msg.type === "image" || msg.type === "file" || msg.type === "folder") && (msg.content || msg.file_url)) {
             feedItems.unshift(msg);
             itemCounter.textContent = `${feedItems.length} ${feedItems.length === 1 ? "item" : "items"}`;
             applyFilter();
 
             if (msg.device_id !== deviceId) {
-                const label = msg.type === "image" ? "New photo" : (msg.type === "file" ? "New file" : "New clip");
+                const label = msg.type === "image" ? "New photo" : (msg.type === "file" ? "New file" : (msg.type === "folder" ? "New folder" : "New clip"));
                 showToast(`${label} from ${formatDeviceName(msg.device_id)}`, "info");
             }
         }
     }
 
-    async function uploadAndTransmitFile(file) {
-        if (!file) return;
+    function showUploadProgress(name, loaded, total) {
+        if (!uploadProgress) return;
+        uploadProgress.hidden = false;
+        const pct = total > 0 ? Math.round((loaded / total) * 100) : 0;
+        uploadProgressBar.style.width = `${pct}%`;
+        uploadProgressText.textContent = `Sharing ${name}…`;
+        uploadProgressPct.textContent = total > 0 ? `${pct}%` : `${Math.round(loaded / 1024)} KB`;
+    }
 
-        showToast(`Sharing ${file.name}…`, "info");
+    function hideUploadProgress() {
+        if (!uploadProgress) return;
+        uploadProgress.hidden = true;
+        uploadProgressBar.style.width = "0%";
+    }
+
+    function postFormWithProgress(url, formData, fileName, totalBytes) {
+        // XHR (not fetch) so big files show a progress bar + can be cancelled.
+        return new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open("POST", url);
+            xhr.upload.onprogress = (e) => {
+                if (e.lengthComputable) showUploadProgress(fileName, e.loaded, e.total);
+                else showUploadProgress(fileName, e.loaded, totalBytes);
+            };
+            xhr.onload = () => {
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    try { resolve(JSON.parse(xhr.responseText)); }
+                    catch (err) { reject(new Error("Bad server reply")); }
+                } else if (xhr.status === 413) {
+                    reject(new Error("Too big (over 2 GB)"));
+                } else {
+                    reject(new Error(`Upload failed (${xhr.status})`));
+                }
+            };
+            xhr.onerror = () => reject(new Error("Connection lost"));
+            xhr.onabort = () => reject(new Error("Cancelled"));
+            xhr.send(formData);
+        });
+    }
+
+    // Minimal stored-zip writer (offline-safe, no CDN). Good enough for
+    // folder sharing on a LAN with no internet access.
+    function crc32(bytes) {
+        let table = crc32._t;
+        if (!table) {
+            table = new Uint32Array(256);
+            for (let n = 0; n < 256; n++) {
+                let c = n;
+                for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+                table[n] = c >>> 0;
+            }
+            crc32._t = table;
+        }
+        let crc = 0xFFFFFFFF;
+        for (let i = 0; i < bytes.length; i++) crc = table[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8);
+        return (crc ^ 0xFFFFFFFF) >>> 0;
+    }
+
+    function zipStore(fileList) {
+        // fileList: [{name, data: Uint8Array}]. Returns Blob (.zip, stored).
+        const enc = new TextEncoder();
+        const chunks = [];
+        const central = [];
+        let offset = 0;
+        for (const f of fileList) {
+            const nameBytes = enc.encode(f.name);
+            const crc = crc32(f.data);
+            const local = new DataView(new ArrayBuffer(30));
+            local.setUint32(0, 0x04034b50, true);
+            local.setUint16(4, 20, true);
+            local.setUint16(6, 0x0800, true); // UTF-8 names
+            local.setUint16(8, 0, true); // stored
+            local.setUint16(10, 0, true); local.setUint16(12, 0, true);
+            local.setUint32(14, crc, true);
+            local.setUint32(18, f.data.length, true);
+            local.setUint32(22, f.data.length, true);
+            local.setUint16(26, nameBytes.length, true);
+            local.setUint16(28, 0, true);
+            chunks.push(local.buffer, nameBytes.buffer, f.data.buffer);
+            central.push({ nameBytes, crc, size: f.data.length, offset });
+            offset += 30 + nameBytes.length + f.data.length;
+        }
+        const cdStart = offset;
+        let cdSize = 0;
+        for (const c of central) {
+            const h = new DataView(new ArrayBuffer(46));
+            h.setUint32(0, 0x02014b50, true);
+            h.setUint16(4, 20, true); h.setUint16(6, 20, true);
+            h.setUint16(8, 0x0800, true); h.setUint16(10, 0, true);
+            h.setUint16(12, 0, true); h.setUint16(14, 0, true);
+            h.setUint32(16, c.crc, true);
+            h.setUint32(20, c.size, true); h.setUint32(24, c.size, true);
+            h.setUint16(28, c.nameBytes.length, true);
+            h.setUint16(30, 0, true); h.setUint16(32, 0, true);
+            h.setUint16(34, 0, true); h.setUint16(36, 0, true);
+            h.setUint32(38, 0, true);
+            h.setUint32(42, c.offset, true);
+            chunks.push(h.buffer, c.nameBytes.buffer);
+            cdSize += 46 + c.nameBytes.length;
+        }
+        const end = new DataView(new ArrayBuffer(22));
+        end.setUint32(0, 0x06054b50, true);
+        end.setUint16(8, central.length, true);
+        end.setUint16(10, central.length, true);
+        end.setUint32(12, cdSize, true);
+        end.setUint32(16, cdStart, true);
+        end.setUint16(20, 0, true);
+        chunks.push(end.buffer);
+        return new Blob(chunks, { type: "application/zip" });
+    }
+
+    async function readAsBytes(file) {
+        const buf = await file.arrayBuffer();
+        return new Uint8Array(buf);
+    }
+
+    async function uploadFolderAsZip(fileList, folderName) {
+        const files = Array.from(fileList || []).filter(f => f && f.size >= 0);
+        if (!files.length) {
+            showToast("That folder is empty", "info");
+            return;
+        }
+        const totalBytes = files.reduce((n, f) => n + (f.size || 0), 0);
+        if (totalBytes > 1024 * 1024 * 1024) {
+            showToast("That folder is too big to share from a phone (over 1 GB)", "info");
+            return;
+        }
+        showToast(`Zipping ${files.length} files…`, "info");
+        const SKIP = ["__MACOSX", ".DS_Store"];
+        const entries = [];
+        let skipped = 0;
+        for (const f of files) {
+            const rel = (f.webkitRelativePath || f.name || "").replace(/^\/+/, "");
+            if (!rel || SKIP.some(s => rel.includes(s))) { skipped++; continue; }
+            entries.push({ name: rel, data: await readAsBytes(f) });
+        }
+        if (!entries.length) {
+            showToast("Nothing to share after skipping system files", "info");
+            return;
+        }
+        const zipBlob = zipStore(entries);
+        const name = `${(folderName || (entries[0].name.split("/")[0]) || "folder")}.zip`;
+        const zipFile = new File([zipBlob], name, { type: "application/zip" });
+        await uploadAndTransmitFile(zipFile, { itemType: "folder", entryCount: entries.length, skippedCount: skipped });
+    }
+
+    async function uploadAndTransmitFile(file, opts = {}) {
+        if (!file) return;
+        const itemTypeHint = opts.itemType;
+        const entryCount = opts.entryCount;
+        const skippedCount = opts.skippedCount;
+
+        if ((file.size || 0) > 200 * 1024 * 1024) {
+            const ok = window.confirm(`"${file.name}" is ${Math.round(file.size / 1048576)} MB. Share it anyway?`);
+            if (!ok) return;
+        }
+        showUploadProgress(file.name, 0, file.size || 0);
 
         try {
             const formData = new FormData();
-            formData.append("file", file);
+            formData.append("file", file, file.name || "file");
+            if (itemTypeHint) formData.append("item_type", itemTypeHint);
+            if (entryCount != null) formData.append("entry_count", String(entryCount));
+            if (skippedCount != null) formData.append("skipped_count", String(skippedCount));
 
-            const response = await fetch("/api/upload", {
-                method: "POST",
-                body: formData
-            });
-
-            if (!response.ok) {
-                throw new Error(`Upload failed with status ${response.status}`);
-            }
-
-            const data = await response.json();
-            const itemType = data.type || "file";
+            const data = await postFormWithProgress("/api/upload", formData, file.name, file.size || 0);
+            hideUploadProgress();
+            const itemType = data.type || itemTypeHint || "file";
 
             if (!ws || ws.readyState !== WebSocket.OPEN) {
                 showToast("Shared on this phone, but sharing is offline.", "info");
@@ -189,11 +343,15 @@ document.addEventListener("DOMContentLoaded", () => {
                 device_id: deviceId,
                 timestamp: new Date().toISOString(),
                 type: itemType,
-                content: itemType === "image" ? data.url : `File: ${data.filename}`,
+                content: itemType === "image" ? data.url : `${itemType === "folder" ? "Folder" : "File"}: ${data.filename}`,
                 filename: data.filename,
                 filesize: data.filesize,
                 file_url: data.url
             };
+            if (data.entry_count != null) payload.entry_count = data.entry_count;
+            else if (entryCount != null) payload.entry_count = entryCount;
+            if (data.skipped_count != null) payload.skipped_count = data.skipped_count;
+            else if (skippedCount != null) payload.skipped_count = skippedCount;
 
             ws.send(JSON.stringify(payload));
             feedItems.unshift(payload);
@@ -201,8 +359,10 @@ document.addEventListener("DOMContentLoaded", () => {
             applyFilter();
             showToast(`Shared ${data.filename} with your computer`, "success");
         } catch (err) {
+            hideUploadProgress();
             console.error("Upload failed:", err);
-            showToast("Could not share that file. Try again.", "info");
+            const msg = /over 2 GB|too big/i.test(String(err && err.message)) ? String(err.message) : "Could not share that file. Try again.";
+            showToast(msg, "info");
         }
     }
 
@@ -293,20 +453,27 @@ document.addEventListener("DOMContentLoaded", () => {
                     <span>Save photo</span>
                 </a>
             `;
-        } else if (itemType === "file") {
-            const fname = item.filename || "File";
-            const fsize = item.filesize ? (item.filesize < 1024 * 1024 ? `${(item.filesize / 1024).toFixed(1)} KB` : `${(item.filesize / (1024 * 1024)).toFixed(1)} MB`) : "";
-            const fileHref = item.file_url || "#";
+        } else if (itemType === "file" || itemType === "folder") {
+            const fname = item.filename || (itemType === "folder" ? "Folder.zip" : "File");
+            const fsize = item.filesize ? formatSize(item.filesize) : "";
+            let sub = fsize;
+            if (itemType === "folder" && item.entry_count != null) {
+                sub = `${item.entry_count} items${fsize ? ` · ${fsize}` : ""}`;
+            }
+            if (item.skipped_count) sub += ` · skipped ${item.skipped_count}`;
+            const rawHref = item.file_url || "#";
+            const fileHref = rawHref === "#" ? "#" : rawHref + (rawHref.includes("?") ? "&" : "?") + `filename=${encodeURIComponent(fname)}`;
+            const icon = itemType === "folder"
+                ? '<svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path></svg>'
+                : '<svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linejoin="round"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path><polyline points="13 2 13 9 20 9"></polyline></svg>';
             bodyHtml = `
                 <div class="file-card-box">
                     <div class="file-icon-badge">
-                        <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linejoin="round">
-                            <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
-                        </svg>
+                        ${icon}
                     </div>
                     <div class="file-details">
                         <span class="file-name-title">${escapeHtml(fname)}</span>
-                        <span class="file-size-subtitle">${fsize}</span>
+                        <span class="file-size-subtitle">${escapeHtml(sub)}</span>
                     </div>
                 </div>
             `;
@@ -317,7 +484,7 @@ document.addEventListener("DOMContentLoaded", () => {
                         <polyline points="7 10 12 15 17 10"></polyline>
                         <line x1="12" y1="15" x2="12" y2="3"></line>
                     </svg>
-                    <span>Save file</span>
+                    <span>${itemType === "folder" ? "Save folder (.zip)" : "Save file"}</span>
                 </a>
             `;
         } else {
@@ -483,6 +650,23 @@ document.addEventListener("DOMContentLoaded", () => {
     // Event Listeners
     uploadImgBtn.addEventListener("click", () => imageInput.click());
     uploadFileBtn.addEventListener("click", () => fileInput.click());
+    if (uploadFolderBtn) {
+        const supportsFolders = (() => {
+            try { return "webkitdirectory" in document.createElement("input"); }
+            catch (e) { return false; }
+        })();
+        if (!supportsFolders) {
+            uploadFolderBtn.disabled = true;
+            uploadFolderBtn.title = "This browser can't pick folders — choose File and select many files instead";
+        }
+        uploadFolderBtn.addEventListener("click", () => {
+            if (!supportsFolders) {
+                showToast("This browser can't pick folders. Choose File and select many files instead.", "info");
+                return;
+            }
+            folderInput.click();
+        });
+    }
 
     imageInput.addEventListener("change", (e) => {
         if (e.target.files && e.target.files[0]) {
@@ -491,12 +675,40 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     });
 
-    fileInput.addEventListener("change", (e) => {
-        if (e.target.files && e.target.files[0]) {
-            uploadAndTransmitFile(e.target.files[0]);
-            fileInput.value = "";
+    fileInput.addEventListener("change", async (e) => {
+        const picked = Array.from(e.target.files || []);
+        fileInput.value = "";
+        if (!picked.length) return;
+        if (picked.length === 1) {
+            uploadAndTransmitFile(picked[0]);
+            return;
         }
+        // Multiple files picked (iOS fallback): zip into one folder share.
+        const total = picked.reduce((n, f) => n + (f.size || 0), 0);
+        if (total > 1024 * 1024 * 1024) {
+            showToast("Those files are too big to share from a phone (over 1 GB)", "info");
+            return;
+        }
+        showToast(`Zipping ${picked.length} files…`, "info");
+        const entries = [];
+        for (const f of picked) {
+            entries.push({ name: f.name || "file", data: await readAsBytes(f) });
+        }
+        const zipBlob = zipStore(entries);
+        const zipFile = new File([zipBlob], "shared_files.zip", { type: "application/zip" });
+        uploadAndTransmitFile(zipFile, { itemType: "folder", entryCount: entries.length, skippedCount: 0 });
     });
+
+    if (folderInput) {
+        folderInput.addEventListener("change", async (e) => {
+            const list = e.target.files;
+            folderInput.value = "";
+            if (!list || !list.length) return;
+            const first = list[0].webkitRelativePath || "";
+            const folderName = first.split("/")[0] || "folder";
+            uploadFolderAsZip(list, folderName);
+        });
+    }
 
     feedSearch.addEventListener("input", applyFilter);
 
@@ -613,6 +825,14 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 
     // Helper functions
+    function formatSize(bytes) {
+        const n = Number(bytes) || 0;
+        if (n < 1024) return `${n} B`;
+        if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+        if (n < 1024 * 1024 * 1024) return `${(n / 1048576).toFixed(1)} MB`;
+        return `${(n / 1073741824).toFixed(2)} GB`;
+    }
+
     function escapeHtml(str) {
         return String(str)
             .replace(/&/g, "&amp;")
@@ -627,6 +847,7 @@ document.addEventListener("DOMContentLoaded", () => {
         if (id === deviceId) return "This phone";
         if (id.startsWith("Phone-") || id.startsWith("Web-")) return "Your phone";
         if (id === "server") return "ClipBoardSync";
+        if (/^(PC|Desktop|Computer)-/i.test(id)) return "Other computer";
         // Likely this computer
         return "This computer";
     }

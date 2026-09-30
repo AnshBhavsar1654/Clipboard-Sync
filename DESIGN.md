@@ -219,14 +219,22 @@ Always make the following states understandable with icon + text
 
 ```text
 ● Sharing on
-◌ Connecting / Starting sharing…
+◌ Connecting / Starting sharing… / Searching for computers…
 ○ Not sharing
 ! Couldn't share — Try again
 ```
 
-Show the source as `This computer` or `Your phone`, never as a raw
-device ID, UUID, Desktop-GUI, Win32, or server. Clip content stays more
-prominent than device and status meta.
+Progress is a first-class state for folders and big files:
+
+```text
+Zipping 'Photos'…
+Sharing Report.zip… 48%
+Saving 'Report.zip'… 48% → Saved to Downloads/ClipBoardSync
+```
+
+Show the source as `This computer`, `Other computer`, or `Your phone`,
+never as a raw device ID, UUID, Desktop-GUI, PC-XXXX, Win32, or server.
+Clip content stays more prominent than device and status meta.
 
 ---
 
@@ -238,12 +246,14 @@ Write for a non-technical person trying to share something quickly.
   not `START BRIDGE`.
 * Active voice, one action per control. The button says `Start sharing`,
   the toast says `Sharing is on`.
-* Name things by what users understand: `This computer`, `Your phone`,
-  `Pairing code`, `Same Wi-Fi`. Never expose how the system is built.
+* Name things by what users understand: `This computer`, `Other computer`,
+  `Your phone`, `Pairing code`, `Same Wi-Fi`. Never expose how the system is built.
 * Errors explain what happened and how to fix it. They never apologize
   excessively and are never vague.
 * Empty screens invite action with a next step and, where possible,
   a button that goes there.
+* Folders are always shared as one `.zip` (`Photos.zip · 12 items`).
+  Big files download over a direct link with a progress bar, never silently.
 
 Preferred terms:
 
@@ -251,15 +261,19 @@ Preferred terms:
 Start sharing / Stop sharing  (never Start/Stop bridge)
 Sharing on / Not sharing       (never Online/Offline bridge)
 Connect your phone             (never Pair your device to the bridge)
+Other computers nearby         (never peers / hosts / beacons)
 Pairing code                   (6-digit code shown on the computer)
 Same Wi-Fi                     (never same subnet / LAN / local routing)
 Copy link / Open on this computer
+Send photo / Send file / Send folder
+Save file / Save folder (.zip) / Save photo
 No phones connected / 1 phone connected
+Searching for computers… / Connected to other computer at 192.168.1.6
 ```
 
 Avoid: bridge, engine, backend, WebSocket, Win32, Uvicorn, LAN bridge,
-SYSOUT, portal, peer, localhost, port (except `Port 8000` in small
-status detail where support needs it).
+SYSOUT, portal, peer, host, beacon, localhost, port (except `Port 8000`
+in small status detail where support needs it).
 
 ---
 

@@ -97,9 +97,11 @@ class WebSocketClient:
         filename: str | None = None,
         filesize: int | None = None,
         file_url: str | None = None,
+        entry_count: int | None = None,
+        skipped_count: int | None = None,
     ) -> None:
         """Queue a clipboard update for transmission to the backend."""
-        message = {
+        message: dict[str, Any] = {
             "device_id": self._device_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "type": content_type,
@@ -111,6 +113,10 @@ class WebSocketClient:
             message["filesize"] = filesize
         if file_url:
             message["file_url"] = file_url
+        if entry_count is not None:
+            message["entry_count"] = entry_count
+        if skipped_count is not None:
+            message["skipped_count"] = skipped_count
 
         await self._send_queue.put(message)
         logger.debug("Queued %s update for send", content_type)

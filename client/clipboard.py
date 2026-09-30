@@ -142,7 +142,7 @@ class ClipboardMonitor:
 
     @staticmethod
     def get_clipboard_payload() -> dict[str, Any] | None:
-        """Inspect system clipboard for text, images, or file drop lists."""
+        """Inspect system clipboard for text, images, files, or folders."""
         # 1. Try reading Image or File list from clipboard using PIL ImageGrab
         try:
             grabbed = ImageGrab.grabclipboard()
@@ -158,7 +158,31 @@ class ClipboardMonitor:
                     "filesize": len(png_bytes),
                 }
             elif isinstance(grabbed, list) and grabbed:
-                first_file = Path(grabbed[0])
+                paths = [Path(p) for p in grabbed]
+                dirs = [p for p in paths if p.is_dir()]
+                files = [p for p in paths if p.is_file()]
+                if dirs:
+                    # Share the first copied folder as a zip (keeps structure)
+                    folder = dirs[0].resolve()
+                    return {
+                        "type": "folder",
+                        "content": f"Folder: {folder.name}",
+                        "filename": folder.name,
+                        "filepath": str(folder),
+                        "entry_count": len(files) + len(dirs),
+                    }
+                if len(files) > 1:
+                    # Multi-file copy: share the first file now; the GUI
+                    # Send flow can share the rest. Keeps the feed clean.
+                    first_file = files[0]
+                    return {
+                        "type": "file",
+                        "content": f"File: {first_file.name} (+{len(files) - 1} more)",
+                        "filename": first_file.name,
+                        "filesize": first_file.stat().st_size,
+                        "filepath": str(first_file.resolve()),
+                    }
+                first_file = files[0] if files else Path(grabbed[0])
                 if first_file.is_file():
                     ext = first_file.suffix.lower()
                     filesize = first_file.stat().st_size

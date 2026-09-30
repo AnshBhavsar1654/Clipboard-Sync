@@ -408,6 +408,45 @@ button:active {
   border-color: var(--ink-faint);
 }
 
+.secondary-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Upload progress — big files show % while sharing */
+.upload-progress {
+  margin-top: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+}
+
+.upload-progress-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--ink-soft);
+  margin-bottom: 8px;
+}
+
+.upload-progress-track {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--surface-raised);
+  overflow: hidden;
+}
+
+.upload-progress-bar {
+  height: 100%;
+  width: 0%;
+  border-radius: 4px;
+  background: var(--primary);
+  transition: width 0.15s ease;
+}
+
 /* Search */
 .feed-search {
   width: 100%;
