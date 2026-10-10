@@ -1,44 +1,57 @@
-"""Windows clipboard monitoring and manipulation via native Win32 APIs."""
+"""Windows clipboard monitoring and manipulation via native Win32 APIs.
+
+Phase 0.2: Win32 access lives in :mod:`client.clipboard_backend` behind the
+``ClipboardBackend`` interface. This monitor keeps its public API but
+delegates reads/writes to the backend so tests can inject ``FakeClipboard``.
+Win32 GUI imports are lazy so this module imports on Linux CI.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import base64
-import ctypes
-import io
 import logging
-from pathlib import Path
 import threading
-import time
 from collections.abc import Awaitable, Callable
-from ctypes import wintypes
+from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageGrab
-import win32clipboard
-import win32con
-import win32gui
+from client.clipboard_backend import (
+    ClipboardBackend,
+    FakeClipboardBackend,
+    default_backend,
+    fingerprint_payload,
+)
 
 logger = logging.getLogger(__name__)
 
 ClipboardChangeHandler = Callable[[str | dict[str, Any]], Awaitable[None] | None]
 
+# Back-compat alias used by tests / external code.
+FakeClipboard = FakeClipboardBackend
+
 _WINDOW_CLASS = "ClipBoardSyncHiddenListener"
 WM_CLIPBOARDUPDATE = 0x031D
 
-_user32 = ctypes.windll.user32
-_user32.AddClipboardFormatListener.argtypes = [wintypes.HWND]
-_user32.AddClipboardFormatListener.restype = wintypes.BOOL
-_user32.RemoveClipboardFormatListener.argtypes = [wintypes.HWND]
-_user32.RemoveClipboardFormatListener.restype = wintypes.BOOL
-
 
 def _add_clipboard_format_listener(hwnd: int) -> bool:
-    return bool(_user32.AddClipboardFormatListener(hwnd))
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    user32.AddClipboardFormatListener.argtypes = [wintypes.HWND]
+    user32.AddClipboardFormatListener.restype = wintypes.BOOL
+    return bool(user32.AddClipboardFormatListener(hwnd))
 
 
 def _remove_clipboard_format_listener(hwnd: int) -> bool:
-    return bool(_user32.RemoveClipboardFormatListener(hwnd))
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    user32.RemoveClipboardFormatListener.argtypes = [wintypes.HWND]
+    user32.RemoveClipboardFormatListener.restype = wintypes.BOOL
+    return bool(user32.RemoveClipboardFormatListener(hwnd))
 
 
 class ClipboardMonitor:
@@ -54,14 +67,17 @@ class ClipboardMonitor:
         self,
         loop: asyncio.AbstractEventLoop,
         on_change: ClipboardChangeHandler,
+        backend: ClipboardBackend | None = None,
     ) -> None:
         self._loop = loop
         self._on_change = on_change
+        self._backend: ClipboardBackend = backend or default_backend()
         self._thread: threading.Thread | None = None
         self._hwnd: int | None = None
         self._stop_event = threading.Event()
 
         self._last_content: str | None = None
+        self._last_fingerprint: str | None = None
         self._suppress_next_change = False
         self._state_lock = threading.Lock()
 
@@ -83,7 +99,13 @@ class ClipboardMonitor:
         """Signal the listener thread to stop and wait for it to exit."""
         self._stop_event.set()
         if self._hwnd:
-            win32gui.PostMessage(self._hwnd, win32con.WM_CLOSE, 0, 0)
+            try:
+                import win32con
+                import win32gui
+
+                win32gui.PostMessage(self._hwnd, win32con.WM_CLOSE, 0, 0)
+            except ImportError:
+                pass
         if self._thread:
             self._thread.join(timeout=5.0)
             self._thread = None
@@ -99,18 +121,14 @@ class ClipboardMonitor:
         with self._state_lock:
             self._suppress_next_change = True
             self._last_content = text
+            self._last_fingerprint = fingerprint_payload({"type": "text", "content": text})
 
-        win32clipboard.OpenClipboard()
-        try:
-            win32clipboard.EmptyClipboard()
-            win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, text)
-        finally:
-            win32clipboard.CloseClipboard()
+        self._backend.write_text(text)
 
         logger.debug("Local clipboard updated programmatically (%d chars)", len(text))
 
     def set_image_from_base64(self, b64_data_uri: str) -> None:
-        """Write base64-encoded image data to Win32 clipboard in CF_DIB format."""
+        """Write base64-encoded image data to clipboard in CF_DIB format."""
         try:
             if "," in b64_data_uri:
                 b64_str = b64_data_uri.split(",", 1)[1]
@@ -118,123 +136,56 @@ class ClipboardMonitor:
                 b64_str = b64_data_uri
 
             raw_bytes = base64.b64decode(b64_str)
-            img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
-
-            buf = io.BytesIO()
-            img.save(buf, "BMP")
-            bmp_bytes = buf.getvalue()
-            dib_bytes = bmp_bytes[14:]  # Omit 14-byte BMP header to get DIB
 
             with self._state_lock:
                 self._suppress_next_change = True
+                # TODO(Phase 2.3/2.4): replace prefix key with full fingerprint +
+                # clipboard sequence-number echo suppression. Kept as-is in Phase 0
+                # so the regression test documents the collision.
                 self._last_content = b64_data_uri[:100]
+                self._last_fingerprint = fingerprint_payload(
+                    {"type": "image", "content": b64_data_uri}
+                )
 
-            win32clipboard.OpenClipboard()
-            try:
-                win32clipboard.EmptyClipboard()
-                win32clipboard.SetClipboardData(win32con.CF_DIB, dib_bytes)
-            finally:
-                win32clipboard.CloseClipboard()
+            self._backend.write_image_bytes(raw_bytes)
 
-            logger.info("Set image (%d bytes DIB) to Windows clipboard programmatically", len(dib_bytes))
+            logger.info("Set image (%d bytes) to clipboard programmatically", len(raw_bytes))
         except Exception as exc:
-            logger.warning("Failed to write image to Windows clipboard: %s", exc)
+            logger.warning("Failed to write image to clipboard: %s", exc)
 
-    @staticmethod
-    def get_clipboard_payload() -> dict[str, Any] | None:
-        """Inspect system clipboard for text, images, files, or folders."""
-        # 1. Try reading Image or File list from clipboard using PIL ImageGrab
+    def set_files(self, paths: list[Path]) -> None:
+        """Put files on the clipboard as CF_HDROP (Phase 2.7 helper, via backend)."""
+        with self._state_lock:
+            self._suppress_next_change = True
+        self._backend.write_files(list(paths))
+
+    def get_clipboard_payload(self=None) -> dict[str, Any] | None:  # type: ignore[no-untyped-def]
+        """Inspect system clipboard for text, images, files, or folders.
+
+        Works both as ``monitor.get_clipboard_payload()`` (uses its backend)
+        and as ``ClipboardMonitor.get_clipboard_payload()`` (default backend).
+        """
         try:
-            grabbed = ImageGrab.grabclipboard()
-            if isinstance(grabbed, Image.Image):
-                buf = io.BytesIO()
-                grabbed.save(buf, format="PNG")
-                png_bytes = buf.getvalue()
-                b64_str = base64.b64encode(png_bytes).decode("utf-8")
-                return {
-                    "type": "image",
-                    "content": f"data:image/png;base64,{b64_str}",
-                    "filename": f"screenshot_{int(time.time())}.png",
-                    "filesize": len(png_bytes),
-                }
-            elif isinstance(grabbed, list) and grabbed:
-                paths = [Path(p) for p in grabbed]
-                dirs = [p for p in paths if p.is_dir()]
-                files = [p for p in paths if p.is_file()]
-                if dirs:
-                    # Share the first copied folder as a zip (keeps structure)
-                    folder = dirs[0].resolve()
-                    return {
-                        "type": "folder",
-                        "content": f"Folder: {folder.name}",
-                        "filename": folder.name,
-                        "filepath": str(folder),
-                        "entry_count": len(files) + len(dirs),
-                    }
-                if len(files) > 1:
-                    # Multi-file copy: share the first file now; the GUI
-                    # Send flow can share the rest. Keeps the feed clean.
-                    first_file = files[0]
-                    return {
-                        "type": "file",
-                        "content": f"File: {first_file.name} (+{len(files) - 1} more)",
-                        "filename": first_file.name,
-                        "filesize": first_file.stat().st_size,
-                        "filepath": str(first_file.resolve()),
-                    }
-                first_file = files[0] if files else Path(grabbed[0])
-                if first_file.is_file():
-                    ext = first_file.suffix.lower()
-                    filesize = first_file.stat().st_size
-                    if ext in (".png", ".jpg", ".jpeg", ".gif", ".webp") and filesize < 10 * 1024 * 1024:
-                        raw = first_file.read_bytes()
-                        mime = f"image/{ext[1:]}" if ext != ".jpg" else "image/jpeg"
-                        b64_str = base64.b64encode(raw).decode("utf-8")
-                        return {
-                            "type": "image",
-                            "content": f"data:{mime};base64,{b64_str}",
-                            "filename": first_file.name,
-                            "filesize": filesize,
-                        }
-                    else:
-                        return {
-                            "type": "file",
-                            "content": f"File: {first_file.name}",
-                            "filename": first_file.name,
-                            "filesize": filesize,
-                            "filepath": str(first_file.resolve()),
-                        }
+            if isinstance(self, ClipboardMonitor):
+                return self._backend.read_payload()
+            return default_backend().read_payload()
         except Exception as exc:
-            logger.debug("ImageGrab inspect exception: %s", exc)
-
-        # 2. Fallback to Unicode text reading
-        text = ClipboardMonitor.get_text()
-        if text and text.strip():
-            return {
-                "type": "text",
-                "content": text,
-            }
-        return None
+            logger.debug("Backend read_payload failed: %s", exc)
+            return None
 
     @staticmethod
     def get_text() -> str | None:
         """Read Unicode text from the clipboard, or None if unavailable."""
         try:
-            win32clipboard.OpenClipboard()
+            return default_backend().read_text()
         except Exception:
-            logger.debug("Clipboard is locked by another process", exc_info=True)
+            logger.debug("Clipboard read failed", exc_info=True)
             return None
 
-        try:
-            if not win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
-                return None
-            data = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
-            return data if isinstance(data, str) else None
-        finally:
-            win32clipboard.CloseClipboard()
-
     @staticmethod
-    def _build_window_class() -> win32gui.WNDCLASS:
+    def _build_window_class():  # type: ignore[no-untyped-def]
+        import win32gui
+
         wc = win32gui.WNDCLASS()
         wc.lpfnWndProc = ClipboardMonitor._static_window_proc
         wc.lpszClassName = _WINDOW_CLASS
@@ -242,6 +193,11 @@ class ClipboardMonitor:
 
     def _run_message_loop(self) -> None:
         """Create a hidden window, register for updates, and pump messages."""
+        try:
+            import win32gui
+        except ImportError:
+            logger.warning("Clipboard monitor needs Windows (win32gui missing); idle.")
+            return
         # Instance is bound before the window is created so the static proc can
         # dispatch back to this monitor from the Win32 callback thread.
         ClipboardMonitor._active_instance = self
@@ -305,12 +261,17 @@ class ClipboardMonitor:
 
     @staticmethod
     def _static_window_proc(hwnd: int, msg: int, wparam: int, lparam: int) -> Any:
+        import win32gui
+
         instance = ClipboardMonitor._active_instance
         if instance is None:
             return win32gui.DefWindowProc(hwnd, msg, wparam, lparam)
         return instance._window_proc(hwnd, msg, wparam, lparam)
 
     def _window_proc(self, hwnd: int, msg: int, wparam: int, lparam: int) -> Any:
+        import win32con
+        import win32gui
+
         if msg == WM_CLIPBOARDUPDATE:
             self._handle_clipboard_update()
         elif msg == win32con.WM_CLOSE:
@@ -328,17 +289,20 @@ class ClipboardMonitor:
                 logger.debug("Ignored programmatic clipboard update")
                 return
 
-        payload = self.get_clipboard_payload()
+        payload = self.get_clipboard_payload()  # type: ignore[call-arg]
         if payload is None:
             logger.debug("Clipboard changed but contains unsupported content")
             return
 
+        # TODO(Phase 2.3): replace with fingerprint_payload(payload) full-hash
+        # dedupe. Kept as [:100] in Phase 0 so the regression test documents it.
         content_key = str(payload.get("content", ""))[:100]
         with self._state_lock:
             if content_key == self._last_content:
                 logger.debug("Ignored duplicate clipboard content")
                 return
             self._last_content = content_key
+            self._last_fingerprint = fingerprint_payload(payload)
 
         p_type = payload.get("type", "text")
         logger.info("Clipboard change detected (type=%s)", p_type)

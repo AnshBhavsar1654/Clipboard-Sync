@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install ruff
+
+      - name: Lint (ruff)
+        # Phase 0 scope: lint the extracted backend + regression tests.
+        # Extend to `ruff check .` once Phases 1-2 clear pre-existing
+        # violations in server/, gui/ and the legacy client modules.
+        run: ruff check client/clipboard_backend.py client/clipboard.py tests/test_regressions.py
+
+      - name: Test (pytest)
+        run: pytest -q

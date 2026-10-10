@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
+IMPLEMENTATION_PLAN.md
 
 server/static/uploads/
 
