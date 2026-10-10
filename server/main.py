@@ -10,12 +10,14 @@ from pathlib import Path
 import sys
 from typing import Any
 
-from fastapi import FastAPI, File, Form, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.requests import Request
+from starlette.responses import Response
 
+from server.auth import is_loopback_host
 from server.hub import SyncHub
 
 logger = logging.getLogger(__name__)
@@ -23,13 +25,51 @@ logger = logging.getLogger(__name__)
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB hard cap
 CHUNK_SIZE = 1024 * 1024  # 1 MB streaming chunks
 
-_SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+_BAD_NAME_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
+
+
+def safe_name(name: str, fallback: str = "file") -> str:
+    """Sanitize a remote-supplied filename without destroying it (plan §1.8).
+
+    Unicode letters are preserved, so ``रिपोर्ट.pdf`` keeps its ``.pdf``
+    extension (the old ASCII-only regex reduced it to ``pdf``). Only
+    characters that are illegal on Windows / in URLs are replaced.
+    """
+    import unicodedata
+
+    name = unicodedata.normalize("NFC", name or "").replace("\\", "/").split("/")[-1].strip()
+    name = _BAD_NAME_CHARS_RE.sub("_", name).strip(" .")
+    stem = name.split(".")[0].upper()
+    if not name or stem in _RESERVED_NAMES:
+        name = f"_{name}" if name else fallback
+    return name[:150]
 
 
 def _sanitize_filename(name: str) -> str:
-    name = (name or "file").strip().replace("\\", "/").split("/")[-1]
-    name = _SAFE_NAME_RE.sub("_", name).strip("._") or "file"
-    return name[:120]
+    return safe_name(name)[:120] or "file"
+
+
+def client_ip(request: Request) -> str:
+    return request.client.host if request.client else ""
+
+
+def is_loopback(request: Request) -> bool:
+    return is_loopback_host(client_ip(request))
+
+
+async def require_device(request: Request) -> None:
+    """HTTP pairing gate (plan §1.2): everything exposing clip data needs a
+    paired device, except loopback (the desktop app itself) and open mode."""
+    store = hub._trust
+    if is_loopback(request) or not store.require_pin:
+        return
+    if not store.verify_token(request.cookies.get("cs_token")):
+        raise HTTPException(status_code=401, detail="Pair this phone first.")
 
 app = FastAPI(
     title="ClipBoardSync Backend",
@@ -58,13 +98,36 @@ UPLOADS_DIR = STATIC_DIR / "uploads"
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-@app.get("/api/history")
+@app.get("/api/history", dependencies=[Depends(require_device)])
 async def get_recent_history() -> dict[str, Any]:
     """REST endpoint to inspect active server clipboard history."""
     return {"items": hub.get_history(), "connection_count": hub.connection_count}
 
 
-@app.post("/api/upload")
+@app.post("/api/pair")
+async def pair_device(request: Request, response: Response, body: dict) -> dict[str, Any]:
+    """Pair a phone over HTTP: trade the single-use pairing code for a
+    server-issued device token stored in an HttpOnly cookie (plan §1.2)."""
+    store, ip = hub._trust, client_ip(request)
+    if store.locked_out(ip):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many tries. Wait a few minutes or ask for a new code.",
+        )
+    if not store.validate_pin(str(body.get("pin", ""))):
+        store.record_fail(ip)
+        raise HTTPException(status_code=401, detail="That code did not match.")
+    token = store.issue_token(str(body.get("name", "Phone"))[:40])
+    store.clear_fails(ip)
+    store.regenerate_pin()  # single-use code
+    response.set_cookie(
+        "cs_token", token, max_age=60 * 60 * 24 * 365,
+        httponly=True, samesite="lax", path="/",
+    )
+    return {"ok": True}
+
+
+@app.post("/api/upload", dependencies=[Depends(require_device)])
 async def upload_file_endpoint(
     file: UploadFile = File(...),
     item_type: str | None = Form(default=None),
@@ -126,7 +189,7 @@ async def upload_file_endpoint(
     return payload
 
 
-@app.get("/api/files/{name}")
+@app.get("/api/files/{name}", dependencies=[Depends(require_device)])
 async def download_file_endpoint(name: str, request: Request):
     """Fast direct download with resume (Range) + attachment disposition."""
     safe = _sanitize_filename(name)

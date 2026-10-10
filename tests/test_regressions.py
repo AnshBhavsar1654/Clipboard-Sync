@@ -1,11 +1,11 @@
 """Phase 0.1 regression safety net (IMPLEMENTATION_PLAN.md).
 
-Tests marked ``xfail`` document bugs verified in the plan and MUST pass
-(XPASS) once Phase 1/2 lands — at that point remove the marker:
-- unauthenticated /api/history + /api/upload (plan §1, verified)
-- unicode filenames losing their extension (plan §2.14, verified)
-- PIN brute-force limit resetting on reconnect (plan §1, verified)
-- desktop loopback socket counted as a "phone" (plan §2.10)
+These tests documented bugs verified in the plan and now pass against the
+Phase 1/2 fixes:
+- authenticated /api/history + /api/upload (plan §1.2)
+- unicode filenames keep their extension (plan §1.8/§2.14)
+- PIN brute-force throttle survives reconnects (plan §1.1)
+- desktop loopback socket not counted as a "phone" (plan §2.10)
 """
 
 from __future__ import annotations
@@ -35,24 +35,15 @@ def locked_hub(tmp_path):
     hub._trust = old_trust
 
 
-@pytest.mark.xfail(
-    strict=False, reason="Phase 1.2: /api/history must require pairing (open today)"
-)
 def test_history_requires_pairing(locked_hub):
     assert TestClient(app).get("/api/history").status_code in (401, 403)
 
 
-@pytest.mark.xfail(
-    strict=False, reason="Phase 1.2: /api/upload must require pairing (open today)"
-)
 def test_upload_requires_pairing(locked_hub):
     r = TestClient(app).post("/api/upload", files={"file": ("a.txt", b"hi")})
     assert r.status_code in (401, 403)
 
 
-@pytest.mark.xfail(
-    strict=False, reason="Phase 2.14: unicode names lose extension today"
-)
 def test_unicode_filename_keeps_extension():
     from server.main import _sanitize_filename
 
@@ -60,9 +51,6 @@ def test_unicode_filename_keeps_extension():
     assert _sanitize_filename("写真.jpg").endswith(".jpg")
 
 
-@pytest.mark.xfail(
-    strict=False, reason="Phase 1.1: PIN throttle resets on reconnect today"
-)
 def test_pin_bruteforce_is_throttled_across_reconnects(locked_hub):
     c = TestClient(app)
     for _ in range(20):
@@ -94,9 +82,6 @@ class _FakeSocket:
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=False, reason="Phase 2.10: loopback client counted as phone today"
-)
 async def test_local_client_not_counted_as_phone(locked_hub):
     locked_hub._trust.require_pin = False  # open mode: auto-approve like desktop app
     local = _FakeSocket("127.0.0.1")
@@ -106,6 +91,25 @@ async def test_local_client_not_counted_as_phone(locked_hub):
         assert locked_hub.connection_count == 0
     finally:
         await locked_hub.disconnect(local)
+
+
+def test_pair_then_history_and_upload(locked_hub):
+    """The gate blocks strangers but lets a paired phone through (plan §1.2)."""
+    c = TestClient(app)
+    assert c.get("/api/history").status_code == 401
+    r = c.post("/api/pair", json={"pin": locked_hub._trust.pairing_pin, "name": "Pixel"})
+    assert r.status_code == 200
+    assert r.json() == {"ok": True}
+    assert c.get("/api/history").status_code == 200
+    up = c.post("/api/upload", files={"file": ("a.txt", b"hi")})
+    assert up.status_code == 200
+
+
+def test_pair_wrong_pin_rejected_then_throttled(locked_hub):
+    c = TestClient(app)
+    for _ in range(5):
+        assert c.post("/api/pair", json={"pin": "000000"}).status_code == 401
+    assert c.post("/api/pair", json={"pin": "000000"}).status_code == 429
 
 
 def test_dedupe_uses_full_content_hash():

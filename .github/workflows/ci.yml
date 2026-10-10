@@ -22,10 +22,10 @@ jobs:
           pip install ruff
 
       - name: Lint (ruff)
-        # Phase 0 scope: lint the extracted backend + regression tests.
-        # Extend to `ruff check .` once Phases 1-2 clear pre-existing
-        # violations in server/, gui/ and the legacy client modules.
-        run: ruff check client/clipboard_backend.py client/clipboard.py tests/test_regressions.py
+        # Lint the new/extracted modules. Extend to `ruff check .` once
+        # remaining phases clear pre-existing violations in server/hub.py,
+        # server/main.py, gui/ and the legacy client modules.
+        run: ruff check client/clipboard_backend.py client/clipboard.py tests/test_regressions.py server/auth.py
 
       - name: Test (pytest)
         run: pytest -q

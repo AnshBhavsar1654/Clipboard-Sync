@@ -7,12 +7,12 @@ import logging
 from typing import Any
 from fastapi import WebSocket
 
-from server.auth import TrustStore, get_store
+from server.auth import MAX_PIN_FAILS, TrustStore, get_store, is_loopback_host
 from server.models import ClipboardItem, get_utc_now_iso
 
 logger = logging.getLogger(__name__)
 
-MAX_AUTH_FAILURES = 5
+MAX_AUTH_FAILURES = MAX_PIN_FAILS
 
 
 class SyncHub:
@@ -34,12 +34,19 @@ class SyncHub:
         self._history: list[ClipboardItem] = []
         self._auth: dict[WebSocket, bool] = {}
         self._auth_failures: dict[WebSocket, int] = {}
+        self._hosts: dict[WebSocket, str] = {}
         self._trust: TrustStore = trust_store or get_store()
         self._lock = asyncio.Lock()
 
     @property
     def connection_count(self) -> int:
-        return sum(1 for auth in self._auth.values() if auth)
+        """Authenticated remote devices only; the desktop app's own loopback
+        socket is not a phone (plan §2.10)."""
+        return sum(
+            1
+            for ws, auth in self._auth.items()
+            if auth and not is_loopback_host(self._hosts.get(ws, ""))
+        )
 
     def get_history(self) -> list[dict[str, Any]]:
         """Return serialized recent clipboard items."""
@@ -47,10 +54,14 @@ class SyncHub:
 
     # -- helpers -----------------------------------------------------------
     @staticmethod
-    def _is_localhost(websocket: WebSocket) -> bool:
+    def _client_host(websocket: WebSocket) -> str:
         client = getattr(websocket, "client", None)
-        host = client.host if client is not None else None
-        return host in ("127.0.0.1", "::1")
+        host = getattr(client, "host", "") if client is not None else ""
+        return host or ""
+
+    @staticmethod
+    def _is_localhost(websocket: WebSocket) -> bool:
+        return is_loopback_host(SyncHub._client_host(websocket))
 
     def _is_authenticated(self, sender: WebSocket | None) -> bool:
         return sender is None or bool(self._auth.get(sender, False))
@@ -72,6 +83,7 @@ class SyncHub:
             self._connections.add(websocket)
             self._auth[websocket] = False
             self._auth_failures[websocket] = 0
+            self._hosts[websocket] = self._client_host(websocket)
 
         # Localhost clients (the desktop app) and open mode (PIN disabled) are trusted at once.
         if self._is_localhost(websocket) or not self._trust.require_pin:
@@ -96,6 +108,7 @@ class SyncHub:
             self._connections.discard(websocket)
             self._auth.pop(websocket, None)
             self._auth_failures.pop(websocket, None)
+            self._hosts.pop(websocket, None)
         logger.info("Client disconnected. Active connections: %d", self.connection_count)
 
     # -- auth handling -----------------------------------------------------
@@ -121,9 +134,19 @@ class SyncHub:
     async def _handle_auth_pin(self, sender: WebSocket, message: dict[str, Any]) -> None:
         device_id = str(message.get("device_id", "")).strip()
         pin = str(message.get("pin", ""))
+        ip = self._client_host(sender)
+        # Throttle by client IP so reconnecting does not reset the limit (plan §1.1).
+        if self._trust.locked_out(ip):
+            logger.warning("Locked-out IP '%s' attempted PIN auth.", ip)
+            await sender.send_json(
+                {"type": "auth_error", "message": "Too many tries. Wait a few minutes or ask for a new code."}
+            )
+            return
         if self._trust.validate_pin(pin):
+            self._trust.clear_fails(ip)
             if device_id:
                 self._trust.trust(device_id)
+            self._trust.regenerate_pin()  # single-use code (plan §1.1)
             async with self._lock:
                 self._auth[sender] = True
             logger.info("Device '%s' authenticated via PIN. Active connections: %d", device_id, self.connection_count)
@@ -135,13 +158,11 @@ class SyncHub:
                 await self.disconnect(sender)
             return
 
-        failures = self._auth_failures.get(sender, 0) + 1
-        async with self._lock:
-            self._auth_failures[sender] = failures
-        if failures >= MAX_AUTH_FAILURES:
-            logger.warning("Device '%s' failed PIN %d times. Closing connection.", device_id, failures)
+        self._trust.record_fail(ip)
+        if self._trust.locked_out(ip):
+            logger.warning("IP '%s' failed PIN %d times. Locking out.", ip, MAX_AUTH_FAILURES)
             await sender.send_json(
-                {"type": "auth_error", "message": "Too many tries. Open the code on your computer again to try again."}
+                {"type": "auth_error", "message": "Too many tries. Wait a few minutes or ask for a new code."}
             )
             try:
                 await sender.close(code=1013)
@@ -149,9 +170,8 @@ class SyncHub:
                 pass
             await self.disconnect(sender)
         else:
-            remaining = MAX_AUTH_FAILURES - failures
             await sender.send_json(
-                {"type": "auth_error", "message": f"That code did not match ({failures}/{MAX_AUTH_FAILURES} tries, {remaining} left)"}
+                {"type": "auth_error", "message": "That code did not match."}
             )
 
     # -- message handling --------------------------------------------------
