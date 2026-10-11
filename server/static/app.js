@@ -437,22 +437,27 @@ document.addEventListener("DOMContentLoaded", () => {
         let actionBtnHtml = "";
 
         if (itemType === "image") {
-            const imgSrc = item.content && item.content.startsWith("data:image/") ? item.content : (item.file_url || item.content);
-            bodyHtml = `
-                <div class="card-media-wrap">
-                    <img src="${imgSrc}" class="card-image-preview" alt="Shared photo" />
-                </div>
-            `;
-            actionBtnHtml = `
-                <a href="${imgSrc}" download="${item.filename || "shared_photo.png"}" class="copy-btn link-btn" target="_blank" rel="noopener">
-                    <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none">
-                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                        <polyline points="7 10 12 15 17 10"></polyline>
-                        <line x1="12" y1="15" x2="12" y2="3"></line>
-                    </svg>
-                    <span>Save photo</span>
-                </a>
-            `;
+            const rawSrc = item.content && item.content.startsWith("data:image/") ? item.content : (item.file_url || item.content);
+            const imgSrc = safeFileUrl(rawSrc);
+            if (!imgSrc) {
+                bodyHtml = `<p class="clip-content">${escapeHtml("This photo couldn't be shown (unsupported link).")}</p>`;
+            } else {
+                bodyHtml = `
+                    <div class="card-media-wrap">
+                        <img src="${imgSrc}" class="card-image-preview" alt="Shared photo" loading="lazy" />
+                    </div>
+                `;
+                actionBtnHtml = `
+                    <a href="${imgSrc}" download="${escapeHtml(item.filename || "shared_photo.png")}" class="copy-btn link-btn" target="_blank" rel="noopener">
+                        <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                            <polyline points="7 10 12 15 17 10"></polyline>
+                            <line x1="12" y1="15" x2="12" y2="3"></line>
+                        </svg>
+                        <span>Save photo</span>
+                    </a>
+                `;
+            }
         } else if (itemType === "file" || itemType === "folder") {
             const fname = item.filename || (itemType === "folder" ? "Folder.zip" : "File");
             const fsize = item.filesize ? formatSize(item.filesize) : "";
@@ -461,11 +466,10 @@ document.addEventListener("DOMContentLoaded", () => {
                 sub = `${item.entry_count} items${fsize ? ` · ${fsize}` : ""}`;
             }
             if (item.skipped_count) sub += ` · skipped ${item.skipped_count}`;
-            const rawHref = item.file_url || "#";
-            const fileHref = rawHref === "#" ? "#" : rawHref + (rawHref.includes("?") ? "&" : "?") + `filename=${encodeURIComponent(fname)}`;
+            const fileHref = safeFileUrl(item.file_url || "");
             const icon = itemType === "folder"
                 ? '<svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path></svg>'
-                : '<svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linejoin="round"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path><polyline points="13 2 13 9 20 9"></polyline></svg>';
+                : '<svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linejoin="round"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2 2V9z"></path><polyline points="13 2 13 9 20 9"></polyline></svg>';
             bodyHtml = `
                 <div class="file-card-box">
                     <div class="file-icon-badge">
@@ -477,16 +481,19 @@ document.addEventListener("DOMContentLoaded", () => {
                     </div>
                 </div>
             `;
-            actionBtnHtml = `
-                <a href="${fileHref}" download="${escapeHtml(fname)}" class="copy-btn link-btn" target="_blank" rel="noopener">
-                    <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none">
-                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                        <polyline points="7 10 12 15 17 10"></polyline>
-                        <line x1="12" y1="15" x2="12" y2="3"></line>
-                    </svg>
-                    <span>${itemType === "folder" ? "Save folder (.zip)" : "Save file"}</span>
-                </a>
-            `;
+            if (fileHref) {
+                const withName = fileHref + (fileHref.includes("?") ? "&" : "?") + `filename=${encodeURIComponent(fname)}`;
+                actionBtnHtml = `
+                    <a href="${withName}" download="${escapeHtml(fname)}" class="copy-btn link-btn" target="_blank" rel="noopener">
+                        <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                            <polyline points="7 10 12 15 17 10"></polyline>
+                            <line x1="12" y1="15" x2="12" y2="3"></line>
+                        </svg>
+                        <span>${itemType === "folder" ? "Save folder (.zip)" : "Save file"}</span>
+                    </a>
+                `;
+            }
         } else {
             bodyHtml = `<pre class="clip-content">${escapeHtml(item.content)}</pre>`;
             actionBtnHtml = `
@@ -506,7 +513,7 @@ document.addEventListener("DOMContentLoaded", () => {
                     ${deviceIcon}
                     <span>${deviceName}</span>
                 </span>
-                <span class="clip-timestamp" title="${item.timestamp || ""}">${timeFormatted}</span>
+                <span class="clip-timestamp" title="${escapeHtml(item.timestamp || "")}">${timeFormatted}</span>
             </div>
             ${bodyHtml}
             <div class="card-actions">
@@ -621,18 +628,59 @@ document.addEventListener("DOMContentLoaded", () => {
         pinError.textContent = "";
     }
 
-    function submitPin() {
+    // Pair over HTTP: trade the code for a server-issued cookie, then open
+    // the socket (the cookie authenticates REST and the WS handshake).
+    // Falls back to the legacy WS auth_pin message for older servers.
+    async function submitPin() {
         const pin = pinInput.value.replace(/\D/g, "").slice(0, 6);
         if (pin.length !== 6) {
             showPinError("Enter the 6-digit code shown on your computer.");
             return;
         }
-        if (!ws || ws.readyState !== WebSocket.OPEN) {
-            showPinError("Sharing is offline. Trying to reconnect…");
-            return;
-        }
         clearPinError();
-        ws.send(JSON.stringify({ type: "auth_pin", device_id: deviceId, pin: pin }));
+        pinSubmit.disabled = true;
+        try {
+            const resp = await fetch("/api/pair", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ pin: pin, name: deviceId })
+            });
+            if (resp.ok) {
+                pinInput.value = "";
+                hideAuthScreen();
+                showToast("Phone connected — ready to share", "success");
+                connect();
+                return;
+            }
+            if (resp.status === 429) {
+                showPinError("Too many tries. Wait a few minutes or ask for a new code.");
+                return;
+            }
+            showPinError("That code did not match. Try again.");
+        } catch (err) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: "auth_pin", device_id: deviceId, pin: pin }));
+            } else {
+                showPinError("Sharing is offline. Trying to reconnect…");
+            }
+        } finally {
+            pinSubmit.disabled = false;
+        }
+    }
+
+    // QR auto-pair (plan §1.3): the code carries ?pair=<code>; consume it
+    // once, then strip it from the address bar.
+    function tryAutoPair() {
+        try {
+            const params = new URLSearchParams(window.location.search);
+            const code = (params.get("pair") || "").replace(/\D/g, "").slice(0, 6);
+            if (code.length !== 6) return;
+            window.history.replaceState({}, "", window.location.pathname);
+            pinInput.value = code;
+            submitPin();
+        } catch (e) {
+            /* ignore malformed URLs */
+        }
     }
 
     // Theme helpers
@@ -842,6 +890,27 @@ document.addEventListener("DOMContentLoaded", () => {
             .replace(/'/g, "&#039;");
     }
 
+    // Allowlist for URLs rendered into src=/href= (plan §1.7). Only links
+    // this server handed out (/api/files/<id>, same origin) and small image
+    // data-URIs may reach the DOM — never javascript:, remote hosts, or
+    // attribute-breaking strings from another device.
+    function safeFileUrl(url) {
+        if (typeof url !== "string" || !url) return null;
+        if (url.startsWith("data:")) {
+            return /^data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$/.test(url) ? url : null;
+        }
+        let u;
+        try {
+            u = new URL(url, window.location.origin);
+        } catch (e) {
+            return null;
+        }
+        if (u.origin !== window.location.origin) return null;
+        const path = u.pathname + u.search + u.hash;
+        if (!/^\/api\/files\/[0-9a-f]{8,64}(\.[A-Za-z0-9]{1,10})?([?#].*)?$/.test(path)) return null;
+        return u.pathname + u.search + u.hash;
+    }
+
     function formatDeviceName(id) {
         if (!id) return "Shared clip";
         if (id === deviceId) return "This phone";
@@ -872,5 +941,6 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // Initialize connection and empty state
     updateEmptyState("", 0);
+    tryAutoPair();
     connect();
 });

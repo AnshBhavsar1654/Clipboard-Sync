@@ -53,6 +53,12 @@ class WebSocketClient:
     def is_connected(self) -> bool:
         return self._connected.is_set()
 
+    def _connect_kwargs(self) -> dict[str, Any]:
+        # max_size=None: screenshots/history frames exceed the websockets
+        # 1 MiB default, which dropped the client with code 1009 in a
+        # reconnect loop (plan §2.1). Bytes travel via /api/files anyway.
+        return {"max_size": None, "ping_interval": 20, "ping_timeout": 20}
+
     async def start(self) -> None:
         """Start connection management and outbound message processing."""
         if self._running:
@@ -128,7 +134,7 @@ class WebSocketClient:
         while self._running:
             try:
                 logger.info("Connecting to %s ...", self._url)
-                async with websockets.connect(self._url) as ws:
+                async with websockets.connect(self._url, **self._connect_kwargs()) as ws:
                     self._connection = ws
                     self._connected.set()
                     attempt = 0

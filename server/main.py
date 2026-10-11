@@ -4,50 +4,28 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import shutil
 from pathlib import Path
 import sys
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.requests import Request
 from starlette.responses import Response
 
 from server.auth import is_loopback_host
+from server.filenames import safe_name
 from server.hub import SyncHub
 
 logger = logging.getLogger(__name__)
 
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB hard cap
 CHUNK_SIZE = 1024 * 1024  # 1 MB streaming chunks
-
-_BAD_NAME_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-_RESERVED_NAMES = {
-    "CON", "PRN", "AUX", "NUL",
-    *(f"COM{i}" for i in range(1, 10)),
-    *(f"LPT{i}" for i in range(1, 10)),
-}
-
-
-def safe_name(name: str, fallback: str = "file") -> str:
-    """Sanitize a remote-supplied filename without destroying it (plan §1.8).
-
-    Unicode letters are preserved, so ``रिपोर्ट.pdf`` keeps its ``.pdf``
-    extension (the old ASCII-only regex reduced it to ``pdf``). Only
-    characters that are illegal on Windows / in URLs are replaced.
-    """
-    import unicodedata
-
-    name = unicodedata.normalize("NFC", name or "").replace("\\", "/").split("/")[-1].strip()
-    name = _BAD_NAME_CHARS_RE.sub("_", name).strip(" .")
-    stem = name.split(".")[0].upper()
-    if not name or stem in _RESERVED_NAMES:
-        name = f"_{name}" if name else fallback
-    return name[:150]
 
 
 def _sanitize_filename(name: str) -> str:
@@ -77,16 +55,34 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# Permit local developers and private subnet connections
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# No CORS middleware: the phone page is same-origin and needs none (plan §1.4).
+# A wildcard CORS policy with credentials would let any website read this
+# PC's clips via loopback; unsafe cross-site writes are rejected below.
 
 hub = SyncHub(max_history=25)
+
+
+@app.middleware("http")
+async def reject_cross_site(request: Request, call_next):
+    """Block cross-site writes (CSRF / DNS-rebinding vs 127.0.0.1, plan §1.4)."""
+    origin = request.headers.get("origin")
+    if origin and request.method not in ("GET", "HEAD", "OPTIONS"):
+        if urlparse(origin).netloc != request.headers.get("host", ""):
+            return JSONResponse({"detail": "Cross-site request blocked."}, status_code=403)
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    resp = await call_next(request)
+    resp.headers["Content-Security-Policy"] = (
+        "default-src 'self'; img-src 'self' data: blob:; "
+        "style-src 'self'; script-src 'self'; connect-src 'self'"
+    )
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["Referrer-Policy"] = "no-referrer"
+    return resp
+
 
 if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
     STATIC_DIR = Path(sys._MEIPASS) / "server" / "static"
@@ -94,7 +90,20 @@ else:
     STATIC_DIR = Path(__file__).parent / "static"
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
-UPLOADS_DIR = STATIC_DIR / "uploads"
+
+def _shared_dir() -> Path:
+    override = os.environ.get("CLIPBOARDSYNC_SHARED_DIR")
+    if override:
+        return Path(override)
+    if sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA", str(Path.home())))
+        return base / "ClipBoardSync" / "shared"
+    return Path.home() / ".clipboardsync" / "shared"
+
+
+# Shared files live OUTSIDE the static mount so /uploads/<name> is never
+# served without auth; downloads go through /api/files/{id} (plan §1.5).
+UPLOADS_DIR = _shared_dir()
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -138,8 +147,8 @@ async def upload_file_endpoint(
     import uuid
     original_name = _sanitize_filename(file.filename or "file")
     ext = Path(original_name).suffix
-    safe_name = f"{uuid.uuid4().hex[:10]}{ext}"
-    dest_path = UPLOADS_DIR / safe_name
+    stored_name = f"{uuid.uuid4().hex[:10]}{ext}"
+    dest_path = UPLOADS_DIR / stored_name
     tmp_path = dest_path.with_suffix(dest_path.suffix + ".part")
 
     total = 0
@@ -172,9 +181,9 @@ async def upload_file_endpoint(
         resolved_type = "image" if mime.startswith("image/") or ext.lower() in (".png", ".jpg", ".jpeg", ".gif", ".webp") else "file"
         if original_name.lower().endswith(".zip") and resolved_type == "file":
             pass
-    relative_url = f"/api/files/{safe_name}"
+    relative_url = f"/api/files/{stored_name}"
 
-    logger.info("Uploaded %s (%d bytes) saved as %s", resolved_type, total, safe_name)
+    logger.info("Uploaded %s (%d bytes) saved as %s", resolved_type, total, stored_name)
 
     payload: dict[str, Any] = {
         "url": relative_url,
@@ -201,7 +210,7 @@ async def download_file_endpoint(name: str, request: Request):
         # Back-compat: old /uploads/ links created before this endpoint
         return JSONResponse(status_code=404, content={"detail": "File not found."})
     size = path.stat().st_size
-    range_header = request.headers.get("range")
+    range_header = request.headers.get("range") if size else None
     download_name = _sanitize_filename(request.query_params.get("filename", safe))
     headers = {
         "Accept-Ranges": "bytes",

@@ -162,7 +162,10 @@ def test_clipboard_monitor_uses_backend_without_win32():
         monitor = ClipboardMonitor(
             loop, lambda p: seen.append(p), backend=FakeClipboardBackend()
         )
-        monitor.set_text("via backend")
-        assert monitor._backend.read_text() == "via backend"
+        try:
+            monitor.set_text("via backend")
+            assert monitor._backend.read_text() == "via backend"
+        finally:
+            monitor.stop()
 
     asyncio.run(_check())

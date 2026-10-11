@@ -210,10 +210,18 @@ class Win32ClipboardBackend:
             import win32con
         except ImportError:
             return None
-        try:
-            win32clipboard.OpenClipboard()
-        except Exception:
-            return None
+        # OpenClipboard fails while another app holds the clipboard (very
+        # common right after a copy) — retry instead of losing it (plan §2.5).
+        import time as _time
+
+        for attempt in range(10):
+            try:
+                win32clipboard.OpenClipboard()
+                break
+            except Exception:
+                if attempt == 9:
+                    return None
+                _time.sleep(0.02 * (attempt + 1))
         try:
             if not win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
                 return None
@@ -226,9 +234,18 @@ class Win32ClipboardBackend:
                 pass
 
     def _open(self) -> None:
+        import time as _time
+
         import win32clipboard
 
-        win32clipboard.OpenClipboard()
+        for attempt in range(10):
+            try:
+                win32clipboard.OpenClipboard()
+                return
+            except Exception:
+                if attempt == 9:
+                    raise
+                _time.sleep(0.02 * (attempt + 1))
 
     def write_text(self, text: str) -> None:
         import win32clipboard

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any
+from urllib.parse import urlparse
 from fastapi import WebSocket
 
 from server.auth import MAX_PIN_FAILS, TrustStore, get_store, is_loopback_host
@@ -13,6 +15,27 @@ from server.models import ClipboardItem, get_utc_now_iso
 logger = logging.getLogger(__name__)
 
 MAX_AUTH_FAILURES = MAX_PIN_FAILS
+
+# Only URLs this server handed out via /api/upload are forwarded (plan §1.6).
+# The desktop client uploads bytes first and shares metadata, so a file_url
+# of any other shape (javascript:, http://evil/…) is dropped, never forwarded.
+_FILE_URL_RE = re.compile(r"^/api/files/[0-9a-f]{8,64}(\.[A-Za-z0-9]{1,10})?([?#].*)?$")
+_MAX_FILENAME_LEN = 255
+
+
+def is_allowed_file_url(file_url: str) -> bool:
+    """True for relative /api/files/<id> links and absolute http(s) URLs
+    whose path is one (host checking happens on the downloading client)."""
+    if not file_url:
+        return False
+    if file_url.startswith("/"):
+        return bool(_FILE_URL_RE.match(file_url))
+    if file_url.startswith("http://") or file_url.startswith("https://"):
+        try:
+            return bool(_FILE_URL_RE.match(urlparse(file_url).path or ""))
+        except Exception:
+            return False
+    return False
 
 
 class SyncHub:
@@ -78,6 +101,17 @@ class SyncHub:
     # -- connection lifecycle ----------------------------------------------
     async def connect(self, websocket: WebSocket) -> None:
         """Register a new WebSocket connection and, if auto-approved, send history."""
+        # Same-origin check on the handshake (plan §1.4): a browser page from
+        # another site must not be able to open a socket to us.
+        try:
+            headers = getattr(websocket, "headers", {}) or {}
+            origin = headers.get("origin")
+            host = headers.get("host", "")
+            if origin and host and urlparse(origin).netloc != host:
+                await websocket.close(code=1008)
+                return
+        except Exception:
+            pass
         await websocket.accept()
         async with self._lock:
             self._connections.add(websocket)
@@ -85,8 +119,20 @@ class SyncHub:
             self._auth_failures[websocket] = 0
             self._hosts[websocket] = self._client_host(websocket)
 
-        # Localhost clients (the desktop app) and open mode (PIN disabled) are trusted at once.
-        if self._is_localhost(websocket) or not self._trust.require_pin:
+        try:
+            cookies = getattr(websocket, "cookies", None) or {}
+            cookie_token = cookies.get("cs_token")
+        except Exception:
+            cookie_token = None
+
+        # Trusted at once: localhost (the desktop app), open mode, or a phone
+        # presenting the server-issued pairing cookie (plan §1.2). The legacy
+        # device_id/PIN messages below stay for older cached phone pages.
+        if (
+            self._is_localhost(websocket)
+            or not self._trust.require_pin
+            or (cookie_token and self._trust.verify_token(cookie_token))
+        ):
             async with self._lock:
                 self._auth[websocket] = True
             try:
@@ -179,6 +225,12 @@ class SyncHub:
         """Process an incoming clipboard event and broadcast to other connected peers."""
         msg_type = message.get("type", "text")
 
+        if msg_type == "ping":
+            try:
+                await sender.send_json({"type": "pong", "device_id": "server"})
+            except Exception:
+                pass
+            return
         if msg_type == "auth_request":
             await self._handle_auth_request(sender, message)
             return
@@ -197,14 +249,27 @@ class SyncHub:
             logger.warning("Received unsupported message format: %s", message)
             return
 
+        # Never forward a file_url this server did not hand out (plan §1.6):
+        # javascript:… runs script on the phone, http://evil/… pulls malware
+        # onto the desktop. Relative links stay relative so PC-to-PC relays
+        # keep working against the right host.
+        file_url = message.get("file_url")
+        if file_url and not is_allowed_file_url(str(file_url)):
+            logger.warning("Dropping clip with untrusted file_url from '%s'", device_id)
+            return
+
+        filename = message.get("filename")
+        if isinstance(filename, str) and len(filename) > _MAX_FILENAME_LEN:
+            filename = filename[:_MAX_FILENAME_LEN]
+
         item = ClipboardItem(
             device_id=device_id,
             timestamp=message.get("timestamp") or get_utc_now_iso(),
             type=content_type,
             content=content,
-            filename=message.get("filename"),
+            filename=filename,
             filesize=message.get("filesize"),
-            file_url=message.get("file_url"),
+            file_url=file_url,
             entry_count=message.get("entry_count"),
             skipped_count=message.get("skipped_count"),
         )

@@ -34,6 +34,7 @@ import uvicorn
 from client.config import Config
 from client.main import ClipBoardSyncApp
 from server.auth import get_store
+from server.filenames import unique_path
 from server.main import app as fastapi_app, hub as sync_hub
 
 # ---------------------------------------------------------------------------
@@ -395,6 +396,13 @@ class BackgroundEngine:
         )
         self._thread.start()
 
+    @property
+    def device_id(self) -> str:
+        """This computer's sync identity (shared with the clipboard client)."""
+        if self._client_app is not None:
+            return self._client_app._config.device_id
+        return Config().device_id
+
     def stop(self) -> None:
         if not self.is_running:
             return
@@ -524,13 +532,8 @@ class BackgroundEngine:
             filename = str(msg.get("filename") or "shared_file")
             dest_dir = Path.home() / "Downloads" / "ClipBoardSync"
             dest_dir.mkdir(parents=True, exist_ok=True)
-            dest = dest_dir / filename
-            if dest.exists():
-                stem, suffix = dest.stem, dest.suffix
-                i = 1
-                while (dest_dir / f"{stem} ({i}){suffix}").exists():
-                    i += 1
-                dest = dest_dir / f"{stem} ({i}){suffix}"
+            # Remote-controlled name: sanitize + keep inside dest_dir (plan §1.8).
+            dest = unique_path(dest_dir, filename)
             async with httpx.AsyncClient(timeout=300.0) as client:
                 async with client.stream("GET", file_url) as resp:
                     if resp.status_code not in (200, 206):
@@ -1146,7 +1149,7 @@ class ClipBoardSyncGUI(ctk.CTk):
 
         self.qr_label = ctk.CTkLabel(qr_card, text="", width=224, height=224)
         self.qr_label.pack(padx=24)
-        self._generate_qr_image(self.mobile_url)
+        self._generate_qr_image(self._pairing_url())
 
         qr_note = ctk.CTkLabel(qr_card, text="Point your phone camera at the code\nto open ClipBoardSync",
                                font=ctk.CTkFont(family=FONT, size=13), text_color=TEXT_FAINT)
@@ -1336,14 +1339,22 @@ class ClipBoardSyncGUI(ctk.CTk):
 
         return frame
 
+    def _pairing_url(self) -> str:
+        """URL encoded in the QR code. Carries the one-time ?pair= code so the
+        phone pairs with no typing (plan §1.3); plain address when open mode."""
+        if self.trust_store.require_pin:
+            return f"{self.mobile_url}/?pair={self.trust_store.pairing_pin}"
+        return self.mobile_url
+
     def _generate_qr_image(self, data: str) -> None:
         """Render the pairing QR code onto a CustomTkinter label."""
         try:
             qr = qrcode.QRCode(version=1, box_size=8, border=2)
             qr.add_data(data)
             qr.make(fit=True)
-            qr_fg = "#111827" if self.theme_name == "light" else "white"
-            pil_img = qr.make_image(fill_color=qr_fg, back_color=SURFACE).convert("RGB")
+            # Always black-on-white with a quiet zone: inverted (white-on-dark)
+            # codes fail on many phone scanners (plan §1, quick win).
+            pil_img = qr.make_image(fill_color="#111827", back_color="#FFFFFF").convert("RGB")
             ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(212, 212))
             self.qr_label.configure(image=ctk_img)
             self.qr_label.image = ctk_img
@@ -1357,6 +1368,10 @@ class ClipBoardSyncGUI(ctk.CTk):
         enabled = self.trust_store.require_pin
         self.pin_value_lbl.configure(text=self.trust_store.pairing_pin if enabled else "Not needed")
         self.pin_policy_lbl.configure(text="PAIRING CODE" if enabled else "PAIRING CODE (TURNED OFF)")
+        # The code is single-use (regenerates after each pairing), so re-encode
+        # the QR whenever the view refreshes — this runs on PIN change already.
+        if hasattr(self, "qr_label"):
+            self._generate_qr_image(self._pairing_url())
 
         for child in self.trusted_scroll.winfo_children():
             child.destroy()
@@ -1672,6 +1687,12 @@ class ClipBoardSyncGUI(ctk.CTk):
             self.log_queue.put(f"[Error] Could not share the folder: {exc}")
 
     def _broadcast_item(self, message: dict[str, Any]) -> None:
+        # Stamp our real device id so the local client recognises its own
+        # item and doesn't download/paste it twice (plan §2.8).
+        try:
+            message = dict(message, device_id=self.engine.device_id)
+        except Exception:
+            pass
         if self.engine._loop and self.engine._loop.is_running():
             asyncio.run_coroutine_threadsafe(sync_hub.handle_message(None, message), self.engine._loop)
         # Two-way PC-to-PC: also forward our clips to the connected computer.
@@ -1716,11 +1737,20 @@ class ClipBoardSyncGUI(ctk.CTk):
         # Quick pre-flight: is there really a ClipBoardSync server there?
         # (Surfaces firewall problems in 2s instead of hanging.)
         def _check_and_connect() -> None:
+            import urllib.error
             import urllib.request
             try:
                 with urllib.request.urlopen(f"http://{ip}:{port}/api/history", timeout=4) as resp:
                     if resp.status != 200:
                         raise OSError(f"HTTP {resp.status}")
+            except urllib.error.HTTPError as exc:
+                # 401/403 means a ClipBoardSync server IS there — it just
+                # wants pairing first. Anything else is unreachable.
+                if exc.code not in (401, 403):
+                    self.log_queue.put(
+                        f"[Error] Couldn't reach {ip}:{port}. Same Wi-Fi? Allow ClipBoardSync through the firewall. (HTTP {exc.code})"
+                    )
+                    return
             except Exception as exc:
                 self.log_queue.put(
                     f"[Error] Couldn't reach {ip}:{port}. Same Wi-Fi? Allow ClipBoardSync through the firewall. ({exc})"

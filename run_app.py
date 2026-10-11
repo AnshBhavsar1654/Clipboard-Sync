@@ -39,13 +39,14 @@ def print_pairing_instructions(port: int) -> None:
     mobile_url = f"http://{ip}:{port}"
     store = get_store()
     pin = store.pairing_pin if store.require_pin else "disabled"
+    qr_url = f"{mobile_url}/?pair={pin}" if store.require_pin else mobile_url
 
     print("")
     print("ClipBoardSync is running")
     print("-" * 62)
     print(f"Address:      {mobile_url}")
     if store.require_pin:
-        print(f"Pairing code: {pin} (enter once on your phone)")
+        print(f"Pairing code: {pin} (single-use: scan the code below, or type it once)")
     print("")
     print("How to connect:")
     print("1. Join the same Wi-Fi on your computer and phone.")
@@ -59,7 +60,7 @@ def print_pairing_instructions(port: int) -> None:
             box_size=1,
             border=2,
         )
-        qr.add_data(mobile_url)
+        qr.add_data(qr_url)
         qr.make(fit=True)
         # Print ASCII representation suitable for standard console screens
         qr.print_ascii(invert=True)

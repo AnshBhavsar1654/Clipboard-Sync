@@ -68,8 +68,25 @@ class ClipBoardSyncApp:
             .replace("/ws", "")
         )
 
-    def _resolve_file_url(self, file_url: str) -> str:
+    def _resolve_file_url(self, file_url: str) -> str | None:
+        """Resolve a hub file_url to a download URL, or None to skip it.
+
+        Absolute URLs are only honored when they point at the sync server we
+        are connected to (plan §1.6) — a paired device must not redirect the
+        desktop into downloading from an arbitrary host.
+        """
+        from urllib.parse import urlparse
+
         if file_url.startswith("http://") or file_url.startswith("https://"):
+            try:
+                got = urlparse(file_url).hostname or ""
+                want = urlparse(self._http_base()).hostname or ""
+            except Exception:
+                return None
+            loopback = ("127.0.0.1", "::1", "localhost")
+            if got != want and not (got in loopback and want in loopback):
+                logger.warning("Ignoring file link pointing at unexpected host: %s", got)
+                return None
             return file_url
         return f"{self._http_base()}{file_url if file_url.startswith('/') else '/' + file_url}"
 
@@ -128,29 +145,26 @@ class ClipBoardSyncApp:
 
     async def _download_shared_file(self, message: dict[str, Any]) -> None:
         """Download a shared file/folder link to ~/Downloads/ClipBoardSync/."""
-        import httpx
         from pathlib import Path
+
+        import httpx
+
+        from server.filenames import unique_path
         file_url = str(message.get("file_url") or "")
         if not file_url:
             return
         url = self._resolve_file_url(file_url)
+        if not url:
+            return
         filename = str(message.get("filename") or "shared_file")
-        safe = "".join(c if c.isalnum() or c in "._- " else "_" for c in filename).strip() or "shared_file"
         dest_dir = Path.home() / "Downloads" / "ClipBoardSync"
         try:
             dest_dir.mkdir(parents=True, exist_ok=True)
-            dest = dest_dir / safe
-            # Avoid overwriting: add (1), (2), ...
-            if dest.exists():
-                stem, suffix = dest.stem, dest.suffix
-                i = 1
-                while (dest_dir / f"{stem} ({i}){suffix}").exists():
-                    i += 1
-                dest = dest_dir / f"{stem} ({i}){suffix}"
+            dest = unique_path(dest_dir, filename)
             async with httpx.AsyncClient(timeout=300.0) as client:
                 async with client.stream("GET", url) as resp:
                     if resp.status_code not in (200, 206):
-                        logger.warning("Download failed (%s) for %s", resp.status_code, safe)
+                        logger.warning("Download failed (%s) for %s", resp.status_code, dest.name)
                         return
                     with dest.open("wb") as out:
                         async for chunk in resp.aiter_bytes(1024 * 1024):
@@ -177,11 +191,14 @@ class ClipBoardSyncApp:
         filepath = payload.get("filepath")
 
         if p_type == "folder" and filepath:
-            # Zip the folder, then stream-upload the zip
+            # Zip the folder off the event loop (zipping blocks sharing while
+            # it runs — plan §2.11), then stream-upload the zip
             try:
                 from server.folder_zip import zip_directory
                 from pathlib import Path
-                zip_path, zip_name, entries, skipped = zip_directory(filepath)
+                zip_path, zip_name, entries, skipped = await asyncio.to_thread(
+                    zip_directory, filepath
+                )
                 try:
                     size = zip_path.stat().st_size
                     if size > 1024 * 1024 * 1024:

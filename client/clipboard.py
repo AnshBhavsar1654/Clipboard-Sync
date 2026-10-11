@@ -12,7 +12,9 @@ import asyncio
 import base64
 import logging
 import threading
+import time
 from collections.abc import Awaitable, Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +34,15 @@ FakeClipboard = FakeClipboardBackend
 
 _WINDOW_CLASS = "ClipBoardSyncHiddenListener"
 WM_CLIPBOARDUPDATE = 0x031D
+
+_DEBOUNCE_SECONDS = 0.06
+
+
+def _seq_is_newer(cur: int, old: int) -> bool:
+    """Wrap-safe 'cur is strictly newer than old' for 32-bit seq numbers."""
+    if cur == old:
+        return False
+    return 0 < ((cur - old) & 0xFFFFFFFF) < 0x80000000
 
 
 def _add_clipboard_format_listener(hwnd: int) -> bool:
@@ -75,10 +86,15 @@ class ClipboardMonitor:
         self._thread: threading.Thread | None = None
         self._hwnd: int | None = None
         self._stop_event = threading.Event()
+        # Reads run here (max 1 at a time) so the Win32 pump never blocks
+        # and bursts of updates coalesce via the debounce below (plan §2.5).
+        self._reader = ThreadPoolExecutor(max_workers=1, thread_name_prefix="clipboard-read")
+        self._reader_shutdown = False
+        self._last_notify = 0.0
 
-        self._last_content: str | None = None
         self._last_fingerprint: str | None = None
         self._suppress_next_change = False
+        self._own_seq = 0
         self._state_lock = threading.Lock()
 
     def start(self) -> None:
@@ -109,21 +125,56 @@ class ClipboardMonitor:
         if self._thread:
             self._thread.join(timeout=5.0)
             self._thread = None
+        if not self._reader_shutdown:
+            self._reader_shutdown = True
+            self._reader.shutdown(wait=True)
         logger.info("Clipboard monitor stopped")
+
+    def _note_own_write(self, payload: dict[str, Any] | None = None) -> None:
+        """Record a programmatic write for echo suppression (plan §2.4).
+
+        The flag is set before the write (cheap, synchronous); the clipboard
+        sequence number is captured after, so the two notifications raised by
+        EmptyClipboard()+SetClipboardData() are both recognised as ours.
+        """
+        with self._state_lock:
+            self._suppress_next_change = True
+            if payload is not None:
+                self._last_fingerprint = fingerprint_payload(payload)
+        try:
+            seq = int(self._backend.sequence_number() or 0)
+        except Exception:
+            seq = 0
+        with self._state_lock:
+            self._own_seq = seq
+
+    def _is_own_update(self) -> bool:
+        """True if the pending clipboard update was written by us."""
+        try:
+            cur = int(self._backend.sequence_number() or 0)
+        except Exception:
+            cur = 0
+        with self._state_lock:
+            if self._own_seq and cur and not _seq_is_newer(cur, self._own_seq):
+                self._suppress_next_change = False
+                return True
+            if self._suppress_next_change:
+                self._suppress_next_change = False
+                return True
+            return False
 
     def set_text(self, text: str) -> None:
         """
         Write text to the local clipboard without triggering an outbound sync.
 
-        Sets a suppression flag so the resulting WM_CLIPBOARDUPDATE notification
-        is not treated as a user-initiated copy.
+        Echo suppression is by clipboard sequence number (plan §2.4), with the
+        one-shot flag as a fallback when the backend has no sequence number.
         """
         with self._state_lock:
             self._suppress_next_change = True
-            self._last_content = text
-            self._last_fingerprint = fingerprint_payload({"type": "text", "content": text})
 
         self._backend.write_text(text)
+        self._note_own_write({"type": "text", "content": text})
 
         logger.debug("Local clipboard updated programmatically (%d chars)", len(text))
 
@@ -139,15 +190,9 @@ class ClipboardMonitor:
 
             with self._state_lock:
                 self._suppress_next_change = True
-                # TODO(Phase 2.3/2.4): replace prefix key with full fingerprint +
-                # clipboard sequence-number echo suppression. Kept as-is in Phase 0
-                # so the regression test documents the collision.
-                self._last_content = b64_data_uri[:100]
-                self._last_fingerprint = fingerprint_payload(
-                    {"type": "image", "content": b64_data_uri}
-                )
 
             self._backend.write_image_bytes(raw_bytes)
+            self._note_own_write({"type": "image", "content": b64_data_uri})
 
             logger.info("Set image (%d bytes) to clipboard programmatically", len(raw_bytes))
         except Exception as exc:
@@ -158,6 +203,7 @@ class ClipboardMonitor:
         with self._state_lock:
             self._suppress_next_change = True
         self._backend.write_files(list(paths))
+        self._note_own_write()
 
     def get_clipboard_payload(self=None) -> dict[str, Any] | None:  # type: ignore[no-untyped-def]
         """Inspect system clipboard for text, images, files, or folders.
@@ -273,7 +319,7 @@ class ClipboardMonitor:
         import win32gui
 
         if msg == WM_CLIPBOARDUPDATE:
-            self._handle_clipboard_update()
+            self._notify_clipboard_changed()
         elif msg == win32con.WM_CLOSE:
             win32gui.DestroyWindow(hwnd)
             return 0
@@ -282,27 +328,48 @@ class ClipboardMonitor:
             return 0
         return win32gui.DefWindowProc(hwnd, msg, wparam, lparam)
 
+    def _notify_clipboard_changed(self) -> None:
+        """Called on the Win32 pump thread: hand the read to the worker so the
+        pump never blocks and bursts coalesce via debounce (plan §2.5)."""
+        self._last_notify = time.monotonic()
+        if self._stop_event.is_set() or self._reader_shutdown:
+            return
+        try:
+            self._reader.submit(self._read_and_dispatch)
+        except RuntimeError:
+            pass  # shutting down
+
     def _handle_clipboard_update(self) -> None:
-        with self._state_lock:
-            if self._suppress_next_change:
-                self._suppress_next_change = False
-                logger.debug("Ignored programmatic clipboard update")
-                return
+        """Synchronous read path (kept for tests / direct callers)."""
+        self._read_and_dispatch(skip_debounce=True)
+
+    def _read_and_dispatch(self, skip_debounce: bool = False) -> None:
+        if not skip_debounce:
+            while True:  # coalesce bursts: wait for 60 ms of quiet
+                wait = _DEBOUNCE_SECONDS - (time.monotonic() - self._last_notify)
+                if wait <= 0 or self._stop_event.is_set():
+                    break
+                time.sleep(wait)
+        if self._stop_event.is_set():
+            return
+
+        if self._is_own_update():
+            logger.debug("Ignored programmatic clipboard update")
+            return
 
         payload = self.get_clipboard_payload()  # type: ignore[call-arg]
         if payload is None:
             logger.debug("Clipboard changed but contains unsupported content")
             return
 
-        # TODO(Phase 2.3): replace with fingerprint_payload(payload) full-hash
-        # dedupe. Kept as [:100] in Phase 0 so the regression test documents it.
-        content_key = str(payload.get("content", ""))[:100]
+        # Full-content hash dedupe (plan §2.3): two different long clips that
+        # share a prefix must both sync.
+        fingerprint = fingerprint_payload(payload)
         with self._state_lock:
-            if content_key == self._last_content:
+            if fingerprint == self._last_fingerprint:
                 logger.debug("Ignored duplicate clipboard content")
                 return
-            self._last_content = content_key
-            self._last_fingerprint = fingerprint_payload(payload)
+            self._last_fingerprint = fingerprint
 
         p_type = payload.get("type", "text")
         logger.info("Clipboard change detected (type=%s)", p_type)
