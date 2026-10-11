@@ -1931,6 +1931,19 @@ class ClipBoardSyncGUI(ctk.CTk):
     def toggle_engine(self) -> None:
         """Start or stop sharing with connected phones."""
         if not self.engine.is_running:
+            # Roll to a free port instead of dying when 8000 is busy (plan §2.12).
+            from server.net import find_open_port
+
+            picked = find_open_port(8000)
+            if picked != self.port:
+                self.port = picked
+                self.engine.port = picked
+                self.mobile_url = f"http://{self.local_ip}:{self.port}"
+                if hasattr(self, "url_disp_label"):
+                    self.url_disp_label.configure(text=self.mobile_url)
+                if hasattr(self, "qr_label"):
+                    self._generate_qr_image(self._pairing_url())
+                self.log_queue.put(f"[Info] Port 8000 is in use — sharing on port {picked} instead.")
             self.engine.start(self.log_queue)
             self.status_badge.configure(text="◌ STARTING…", text_color=WARNING)
             self.settings_status_lbl.configure(text="Status: Starting sharing…", text_color=WARNING)

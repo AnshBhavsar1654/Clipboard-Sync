@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import re
 import shutil
+from contextlib import asynccontextmanager
 from pathlib import Path
 import sys
 from typing import Any
@@ -49,10 +51,45 @@ async def require_device(request: Request) -> None:
     if not store.verify_token(request.cookies.get("cs_token")):
         raise HTTPException(status_code=401, detail="Pair this phone first.")
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup sweep + 10-minute janitor for orphaned shared files (plan §2.9)."""
+    if hub.uploads_dir is None:
+        hub.uploads_dir = UPLOADS_DIR
+    hub._sweep_uploads()
+    stop = asyncio.Event()
+
+    async def _janitor() -> None:
+        try:
+            while not stop.is_set():
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=600)
+                except TimeoutError:
+                    pass
+                if stop.is_set():
+                    break
+                hub._sweep_uploads()
+        except asyncio.CancelledError:
+            pass
+
+    task = asyncio.create_task(_janitor(), name="upload-janitor")
+    try:
+        yield
+    finally:
+        stop.set()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
 app = FastAPI(
     title="ClipBoardSync Backend",
     description="Cross-device local Wi-Fi clipboard synchronization engine.",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 # No CORS middleware: the phone page is same-origin and needs none (plan §1.4).
@@ -111,6 +148,35 @@ UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 async def get_recent_history() -> dict[str, Any]:
     """REST endpoint to inspect active server clipboard history."""
     return {"items": hub.get_history(), "connection_count": hub.connection_count}
+
+
+@app.get("/api/devices", dependencies=[Depends(require_device)])
+async def get_devices() -> dict[str, Any]:
+    """Connected devices with names (plan §2.10)."""
+    devices = hub.devices()
+    return {"devices": devices, "connection_count": len(devices)}
+
+
+@app.delete("/api/history/{clip_id}", dependencies=[Depends(require_device)])
+async def delete_clip(clip_id: str) -> dict[str, Any]:
+    """Delete one clip everywhere, including its file (plan §2.9/§3.6)."""
+    if not await hub.remove_item(clip_id):
+        raise HTTPException(status_code=404, detail="Clip not found.")
+    return {"ok": True}
+
+
+@app.delete("/api/history", dependencies=[Depends(require_device)])
+async def clear_history() -> dict[str, Any]:
+    """Really delete history; pinned files are exempt (plan §2.9)."""
+    await hub.clear_history()
+    return {"ok": True}
+
+
+@app.post("/api/history/{clip_id}/pin", dependencies=[Depends(require_device)])
+async def pin_clip(clip_id: str, body: dict) -> dict[str, Any]:
+    """Pin/unpin a clip: {"pinned": true/false} (plan §2.9)."""
+    await hub.set_pinned(clip_id, bool(body.get("pinned", True)))
+    return {"ok": True}
 
 
 @app.post("/api/pair")
@@ -297,9 +363,12 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             except json.JSONDecodeError:
                 logger.warning("Received malformed JSON on WebSocket: %s", data)
     except WebSocketDisconnect:
-        await hub.disconnect(websocket)
+        pass
     except Exception as exc:
         logger.exception("Unexpected error in WebSocket session: %s", exc)
+    finally:
+        # Idempotent: guarantees no ghost entries even when the task is
+        # cancelled before the disconnect message is processed.
         await hub.disconnect(websocket)
 
 

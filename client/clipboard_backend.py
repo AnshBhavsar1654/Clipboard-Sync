@@ -40,11 +40,44 @@ def fingerprint_payload(payload: dict[str, Any]) -> str:
     return h.hexdigest()
 
 
+# Clipboard formats that mean "do not record / do not share" (plan §2.6).
+# Honored by password managers and Windows' own clipboard history.
+_EXCLUDE_FORMAT_NAMES = (
+    "ExcludeClipboardContentFromMonitorProcessing",
+    "CanIncludeInClipboardHistory",  # DWORD 0 = exclude
+    "CanUploadToCloudClipboard",  # DWORD 0 = exclude
+)
+
+# Best-effort owner blocklist for password managers (plan §2.6).
+BLOCKED_OWNER_EXES = frozenset(
+    {
+        "keepass.exe",
+        "keepassxc.exe",
+        "1password.exe",
+        "bitwarden.exe",
+        "dashlane.exe",
+        "lastpass.exe",
+        "enpass.exe",
+        "roboform.exe",
+    }
+)
+
+
+def owner_exe_blocked(exe_name: str, blocked: frozenset[str] = BLOCKED_OWNER_EXES) -> bool:
+    """Pure check: is this clipboard-owner executable on the blocklist?"""
+    base = (exe_name or "").replace("/", "\\").rsplit("\\", 1)[-1].strip().lower()
+    return bool(base) and base in blocked
+
+
 class ClipboardBackend(Protocol):
     """Thin interface over OS clipboard access."""
 
-    def read_payload(self) -> dict[str, Any] | None:
-        """Inspect the OS clipboard, return a payload dict or None."""
+    def read_payload(self, *, skip_private: bool = True) -> dict[str, Any] | None:
+        """Inspect the OS clipboard, return a payload dict or None.
+
+        With ``skip_private`` (default), clips marked do-not-record by
+        password managers are reported as None (plan §2.6).
+        """
         ...
 
     def write_text(self, text: str) -> None:
@@ -75,8 +108,11 @@ class FakeClipboardBackend:
         self._files: list[Path] = []
         self._seq = 0
         self.writes: list[tuple[str, Any]] = []
+        self.simulate_private = False
 
-    def read_payload(self) -> dict[str, Any] | None:
+    def read_payload(self, *, skip_private: bool = True) -> dict[str, Any] | None:
+        if skip_private and self.simulate_private:
+            return None
         if self._files:
             first = self._files[0]
             return {
@@ -131,7 +167,79 @@ class Win32ClipboardBackend:
     module stays importable on Linux CI (instantiation raises on non-Windows).
     """
 
-    def read_payload(self) -> dict[str, Any] | None:
+    def __init__(self) -> None:
+        self.blocked_owner_exes: set[str] = set(BLOCKED_OWNER_EXES)
+
+    def _is_private_clip(self) -> bool:
+        """True when the current clip is marked do-not-record or owned by a
+        blocked password-manager app (plan §2.6). Never raises."""
+        try:
+            import win32clipboard
+        except ImportError:
+            return False
+        try:
+            win32clipboard.OpenClipboard()
+        except Exception:
+            return False
+        try:
+            fmt_ids = [win32clipboard.RegisterClipboardFormat(n) for n in _EXCLUDE_FORMAT_NAMES]
+            if win32clipboard.IsClipboardFormatAvailable(fmt_ids[0]):
+                return True
+            for fmt in fmt_ids[1:]:
+                if not win32clipboard.IsClipboardFormatAvailable(fmt):
+                    continue
+                try:
+                    raw = win32clipboard.GetClipboardData(fmt)
+                    blob = bytes(raw) if isinstance(raw, (bytes, bytearray)) else b""
+                    if int.from_bytes(blob[:4].ljust(4, b"\0"), "little") == 0:
+                        return True
+                except Exception:
+                    continue
+            return owner_exe_blocked(self._clipboard_owner_exe() or "", frozenset(self.blocked_owner_exes))
+        except Exception:
+            return False
+        finally:
+            try:
+                win32clipboard.CloseClipboard()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _clipboard_owner_exe() -> str | None:
+        """Executable owning the clipboard, or None when unknowable."""
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            import win32clipboard
+
+            hwnd = win32clipboard.GetClipboardOwner()
+            if not hwnd:
+                return None
+            pid = wintypes.DWORD()
+            ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if not pid.value:
+                return None
+            kernel32, psapi = ctypes.windll.kernel32, ctypes.windll.psapi
+            handle = kernel32.OpenProcess(0x0410, False, pid.value)
+            if not handle:
+                return None
+            try:
+                buf = ctypes.create_unicode_buffer(260)
+                if psapi.GetModuleFileNameExW(handle, None, buf, 260):
+                    return buf.value
+                return None
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return None
+
+    def read_payload(self, *, skip_private: bool = True) -> dict[str, Any] | None:
+        import logging as _logging
+
+        if skip_private and self._is_private_clip():
+            _logging.getLogger(__name__).debug("Skipping private clipboard content")
+            return None
         try:
             from PIL import Image, ImageGrab
         except Exception:

@@ -27,6 +27,8 @@ class ReceivePrefs:
     receive_folder: str = ""  # "" = ~/Downloads/ClipBoardSync
     auto_receive_max_bytes: int = AUTO_RECEIVE_MAX_BYTES
     put_received_on_clipboard: bool = True
+    share_private_clips: bool = False  # plan §2.6: skip do-not-record clips
+    extra_blocked_apps: list[str] | None = None
 
 
 def load_prefs(config_dir: Path) -> ReceivePrefs:
@@ -46,6 +48,11 @@ def load_prefs(config_dir: Path) -> ReceivePrefs:
             pass
         if isinstance(data.get("put_received_on_clipboard"), bool):
             prefs.put_received_on_clipboard = data["put_received_on_clipboard"]
+        if isinstance(data.get("share_private_clips"), bool):
+            prefs.share_private_clips = data["share_private_clips"]
+        extra = data.get("extra_blocked_apps")
+        if isinstance(extra, list):
+            prefs.extra_blocked_apps = [str(a) for a in extra if isinstance(a, str)][:50]
         return prefs
     except (OSError, ValueError):
         return ReceivePrefs()
@@ -61,6 +68,8 @@ def save_prefs(config_dir: Path, prefs: ReceivePrefs) -> None:
                     "receive_folder": prefs.receive_folder,
                     "auto_receive_max_bytes": prefs.auto_receive_max_bytes,
                     "put_received_on_clipboard": prefs.put_received_on_clipboard,
+                    "share_private_clips": prefs.share_private_clips,
+                    "extra_blocked_apps": prefs.extra_blocked_apps or [],
                 },
                 indent=2,
             ),

@@ -18,6 +18,12 @@ def main() -> None:
         datefmt="%H:%M:%S",
     )
 
+    from server.net import ensure_single_instance
+
+    if not ensure_single_instance():
+        print("ClipBoardSync is already running. Use the open window.", file=sys.stderr)
+        sys.exit(0)
+
     app = ClipBoardSyncGUI()
     try:
         app.mainloop()

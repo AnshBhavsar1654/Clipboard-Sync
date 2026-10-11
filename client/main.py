@@ -34,6 +34,8 @@ class ClipBoardSyncApp:
         self._clipboard = ClipboardMonitor(
             loop=self._loop,
             on_change=self._on_local_clipboard_change,
+            skip_private=not self._prefs.share_private_clips,
+            blocked_apps=self._prefs.extra_blocked_apps,
         )
         self._websocket = WebSocketClient(
             url=config.websocket_url,

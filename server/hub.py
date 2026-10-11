@@ -5,12 +5,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 from fastapi import WebSocket
 
 from server.auth import MAX_PIN_FAILS, TrustStore, get_store, is_loopback_host
 from server.models import ClipboardItem, get_utc_now_iso
+from server.store import HistoryStore
 
 logger = logging.getLogger(__name__)
 
@@ -55,15 +58,32 @@ class SyncHub:
     re-scans the QR code in the same browser connects without being asked again.
     """
 
-    def __init__(self, max_history: int = 25, trust_store: TrustStore | None = None) -> None:
+    def __init__(
+        self,
+        max_history: int = 25,
+        trust_store: TrustStore | None = None,
+        store: HistoryStore | None = None,
+    ) -> None:
         self.max_history = max_history
         self._connections: set[WebSocket] = set()
         self._history: list[ClipboardItem] = []
         self._auth: dict[WebSocket, bool] = {}
         self._auth_failures: dict[WebSocket, int] = {}
         self._hosts: dict[WebSocket, str] = {}
+        self._devices: dict[WebSocket, dict[str, Any]] = {}
+        self._pinned: set[str] = set()
         self._trust: TrustStore = trust_store or get_store()
+        self._store: HistoryStore = store or HistoryStore()
+        self.uploads_dir: Path | None = None  # set by server.main (avoids import cycle)
         self._lock = asyncio.Lock()
+        # History survives restarts (plan §2.9).
+        try:
+            for msg in self._store.load_recent(max_history):
+                if msg.pop("pinned", False):
+                    self._pinned.add(msg.get("id", ""))
+                self._history.append(ClipboardItem(**msg))
+        except Exception as exc:
+            logger.warning("Could not load persisted history: %s", exc)
 
     @property
     def connection_count(self) -> int:
@@ -78,6 +98,94 @@ class SyncHub:
     def get_history(self) -> list[dict[str, Any]]:
         """Return serialized recent clipboard items."""
         return [item.to_message_dict() for item in self._history]
+
+    def devices(self) -> list[dict[str, Any]]:
+        """Authenticated remote devices (plan §2.10): id, name, kind, ip, since."""
+        out: list[dict[str, Any]] = []
+        for ws, auth in self._auth.items():
+            if not auth or is_loopback_host(self._hosts.get(ws, "")):
+                continue
+            info = self._devices.get(ws, {})
+            out.append(
+                {
+                    "id": info.get("device_id", ""),
+                    "name": info.get("name", "") or info.get("device_id", ""),
+                    "kind": info.get("kind", ""),
+                    "ip": self._hosts.get(ws, ""),
+                    "since": info.get("since", 0),
+                }
+            )
+        return out
+
+    def _note_device(self, sender: WebSocket, device_id: str = "", name: str = "", kind: str = "") -> None:
+        info = self._devices.get(sender)
+        if info is None:
+            info = {"since": time.time()}
+            self._devices[sender] = info
+        if device_id:
+            info["device_id"] = device_id[:80]
+        if name:
+            info["name"] = name[:80]
+        if kind:
+            info["kind"] = kind[:20]
+
+    async def set_pinned(self, clip_id: str, pinned: bool) -> None:
+        async with self._lock:
+            if pinned:
+                self._pinned.add(clip_id)
+            else:
+                self._pinned.discard(clip_id)
+        self._store.set_pinned(clip_id, pinned)
+
+    def is_pinned(self, clip_id: str) -> bool:
+        return clip_id in self._pinned
+
+    async def remove_item(self, clip_id: str) -> bool:
+        """Delete a clip everywhere incl. its file when unreferenced (plan §2.9/§3.6)."""
+        async with self._lock:
+            found = next((i for i in self._history if i.id == clip_id), None)
+            self._history = [i for i in self._history if i.id != clip_id]
+            self._pinned.discard(clip_id)
+        if found is None:
+            return False
+        self._store.remove(clip_id)
+        self._delete_file_if_orphaned(found.file_url)
+        return True
+
+    async def clear_history(self) -> None:
+        """Really delete history (plan §2.9); pinned files are exempt."""
+        async with self._lock:
+            self._history.clear()
+        self._store.clear()
+        self._pinned.clear()
+        self._sweep_uploads()
+
+    def _file_id_of(self, file_url: str | None) -> str:
+        if not file_url or "/api/files/" not in file_url:
+            return ""
+        return file_url.rsplit("/api/files/", 1)[-1].split("?", 1)[0].split("#", 1)[0]
+
+    def _delete_file_if_orphaned(self, file_url: str | None) -> None:
+        fid = self._file_id_of(file_url)
+        if not fid or self.uploads_dir is None:
+            return
+        if fid in self._store.referenced_file_ids():
+            return
+        try:
+            (self.uploads_dir / fid).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def _sweep_uploads(self) -> int:
+        if self.uploads_dir is None:
+            return 0
+        try:
+            from server.store import sweep_uploads
+
+            return sweep_uploads(self.uploads_dir, self._store.referenced_file_ids())
+        except Exception as exc:
+            logger.warning("Upload sweep failed: %s", exc)
+            return 0
 
     # -- helpers -----------------------------------------------------------
     @staticmethod
@@ -137,6 +245,7 @@ class SyncHub:
             or not self._trust.require_pin
             or (cookie_token and self._trust.verify_token(cookie_token))
         ):
+            self._note_device(websocket)
             async with self._lock:
                 self._auth[websocket] = True
             try:
@@ -159,6 +268,7 @@ class SyncHub:
             self._auth.pop(websocket, None)
             self._auth_failures.pop(websocket, None)
             self._hosts.pop(websocket, None)
+            self._devices.pop(websocket, None)
         logger.info("Client disconnected. Active connections: %d", self.connection_count)
 
     # -- auth handling -----------------------------------------------------
@@ -169,6 +279,7 @@ class SyncHub:
             bool(device_id) and self._trust.is_trusted(device_id)
         )
         if approved:
+            self._note_device(sender, device_id=device_id)
             async with self._lock:
                 self._auth[sender] = True
             try:
@@ -196,6 +307,7 @@ class SyncHub:
             self._trust.clear_fails(ip)
             if device_id:
                 self._trust.trust(device_id)
+            self._note_device(sender, device_id=device_id)
             self._trust.regenerate_pin()  # single-use code (plan §1.1)
             async with self._lock:
                 self._auth[sender] = True
@@ -234,6 +346,17 @@ class SyncHub:
                 await sender.send_json({"type": "pong", "device_id": "server"})
             except Exception:
                 pass
+            return
+        if msg_type == "hello":
+            # Device identity for the device list (plan §2.10). Only from
+            # authenticated sockets; the cookie path has no device_id yet.
+            if self._is_authenticated(sender):
+                self._note_device(
+                    sender,
+                    device_id=str(message.get("device_id", "")).strip(),
+                    name=str(message.get("name", "")).strip(),
+                    kind=str(message.get("kind", "")).strip(),
+                )
             return
         if msg_type == "auth_request":
             await self._handle_auth_request(sender, message)
@@ -292,14 +415,22 @@ class SyncHub:
 
         async with self._lock:
             # Prevent repetitive consecutive duplicates in history feed
+            appended = False
             if not self._history or self._history[-1].content != item.content or self._history[-1].file_url != item.file_url:
                 self._history.append(item)
                 if len(self._history) > self.max_history:
                     self._history.pop(0)
+                appended = True
 
             peers = [ws for ws in self._connections if ws != sender and self._auth.get(ws, False)]
 
         payload = item.to_message_dict()
+        if appended:
+            try:
+                # Off the loop: sync SQLite must not delay the broadcast.
+                await asyncio.to_thread(self._store.add, payload)
+            except Exception as exc:
+                logger.warning("Could not persist clip: %s", exc)
         logger.info("Broadcasting clipboard clip (%s) from device '%s' to %d peers", content_type, device_id, len(peers))
 
         # One slow phone must not delay the rest, and a failing peer must not

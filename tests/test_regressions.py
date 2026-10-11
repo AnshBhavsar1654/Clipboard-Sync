@@ -11,10 +11,9 @@ Phase 1/2 fixes:
 from __future__ import annotations
 
 import pytest
-from fastapi.testclient import TestClient
 
 from server.auth import TrustStore
-from server.main import app, hub
+from server.main import hub
 
 
 @pytest.fixture()
@@ -35,12 +34,12 @@ def locked_hub(tmp_path):
     hub._trust = old_trust
 
 
-def test_history_requires_pairing(locked_hub):
-    assert TestClient(app).get("/api/history").status_code in (401, 403)
+def test_history_requires_pairing(locked_hub, client):
+    assert client.get("/api/history").status_code in (401, 403)
 
 
-def test_upload_requires_pairing(locked_hub):
-    r = TestClient(app).post("/api/upload", files={"file": ("a.txt", b"hi")})
+def test_upload_requires_pairing(locked_hub, client):
+    r = client.post("/api/upload", files={"file": ("a.txt", b"hi")})
     assert r.status_code in (401, 403)
 
 
@@ -51,8 +50,8 @@ def test_unicode_filename_keeps_extension():
     assert _sanitize_filename("写真.jpg").endswith(".jpg")
 
 
-def test_pin_bruteforce_is_throttled_across_reconnects(locked_hub):
-    c = TestClient(app)
+def test_pin_bruteforce_is_throttled_across_reconnects(locked_hub, client):
+    c = client
     for _ in range(20):
         with c.websocket_connect("/ws") as ws:
             ws.send_json({"type": "auth_pin", "device_id": "x", "pin": "000000"})
@@ -93,9 +92,9 @@ async def test_local_client_not_counted_as_phone(locked_hub):
         await locked_hub.disconnect(local)
 
 
-def test_pair_then_history_and_upload(locked_hub):
+def test_pair_then_history_and_upload(locked_hub, client):
     """The gate blocks strangers but lets a paired phone through (plan §1.2)."""
-    c = TestClient(app)
+    c = client
     assert c.get("/api/history").status_code == 401
     r = c.post("/api/pair", json={"pin": locked_hub._trust.pairing_pin, "name": "Pixel"})
     assert r.status_code == 200
@@ -105,8 +104,8 @@ def test_pair_then_history_and_upload(locked_hub):
     assert up.status_code == 200
 
 
-def test_pair_wrong_pin_rejected_then_throttled(locked_hub):
-    c = TestClient(app)
+def test_pair_wrong_pin_rejected_then_throttled(locked_hub, client):
+    c = client
     for _ in range(5):
         assert c.post("/api/pair", json={"pin": "000000"}).status_code == 401
     assert c.post("/api/pair", json={"pin": "000000"}).status_code == 429

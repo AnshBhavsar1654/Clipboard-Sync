@@ -76,7 +76,16 @@ document.addEventListener("DOMContentLoaded", () => {
                 updateConnectionStatus("connecting");
                 showToast("Connected — ready to share", "success");
                 ws.send(JSON.stringify({ type: "auth_request", device_id: deviceId }));
+                sendHello();
             };
+
+            function sendHello() {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: "hello", device_id: deviceId, name: deviceId, kind: "phone" }));
+                }
+            }
+
+            ws._sendHello = sendHello;
 
             ws.onmessage = (event) => {
                 try {
@@ -140,6 +149,7 @@ document.addEventListener("DOMContentLoaded", () => {
         if (msg.type === "auth_success") {
             hideAuthScreen();
             updateConnectionStatus("connected");
+            if (ws && ws._sendHello) ws._sendHello();
             if (Array.isArray(msg.items)) {
                 feedItems = msg.items.slice().reverse(); // newest first
                 itemCounter.textContent = `${feedItems.length} ${feedItems.length === 1 ? "item" : "items"}`;
@@ -150,6 +160,7 @@ document.addEventListener("DOMContentLoaded", () => {
         if (msg.type === "history" && Array.isArray(msg.items)) {
             hideAuthScreen();
             updateConnectionStatus("connected");
+            if (ws && ws._sendHello) ws._sendHello();
             feedItems = msg.items.slice().reverse(); // newest first
             itemCounter.textContent = `${feedItems.length} ${feedItems.length === 1 ? "item" : "items"}`;
             applyFilter();

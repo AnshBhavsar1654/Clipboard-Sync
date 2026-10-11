@@ -13,7 +13,7 @@ import base64
 import logging
 import threading
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -79,10 +79,18 @@ class ClipboardMonitor:
         loop: asyncio.AbstractEventLoop,
         on_change: ClipboardChangeHandler,
         backend: ClipboardBackend | None = None,
+        skip_private: bool = True,
+        blocked_apps: Collection[str] | None = None,
     ) -> None:
         self._loop = loop
         self._on_change = on_change
         self._backend: ClipboardBackend = backend or default_backend()
+        self._skip_private = skip_private
+        if blocked_apps and hasattr(self._backend, "blocked_owner_exes"):
+            try:
+                self._backend.blocked_owner_exes.update(a.lower() for a in blocked_apps)  # type: ignore[union-attr]
+            except Exception:
+                pass
         self._thread: threading.Thread | None = None
         self._hwnd: int | None = None
         self._stop_event = threading.Event()
@@ -216,7 +224,7 @@ class ClipboardMonitor:
         """
         try:
             if isinstance(self, ClipboardMonitor):
-                return self._backend.read_payload()
+                return self._backend.read_payload(skip_private=self._skip_private)
             return default_backend().read_payload()
         except Exception as exc:
             logger.debug("Backend read_payload failed: %s", exc)

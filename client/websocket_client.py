@@ -56,8 +56,26 @@ class WebSocketClient:
     def _connect_kwargs(self) -> dict[str, Any]:
         # max_size=None: screenshots/history frames exceed the websockets
         # 1 MiB default, which dropped the client with code 1009 in a
-        # reconnect loop (plan §2.1). Bytes travel via /api/files anyway.
+        # reconnect loop (plan §2.1). Bytes travel through /api/files anyway.
         return {"max_size": None, "ping_interval": 20, "ping_timeout": 20}
+
+    async def _send_hello(self, ws: ClientConnection) -> None:
+        """Identify this computer for the hub device list (plan §2.10)."""
+        try:
+            import socket as _socket
+
+            try:
+                name = _socket.gethostname()
+            except Exception:
+                name = ""
+            await ws.send(json.dumps({
+                "type": "hello",
+                "device_id": self._device_id,
+                "name": name,
+                "kind": "computer",
+            }))
+        except Exception as exc:
+            logger.debug("Hello send failed: %s", exc)
 
     async def start(self) -> None:
         """Start connection management and outbound message processing."""
@@ -142,6 +160,7 @@ class WebSocketClient:
                     self._connected.set()
                     attempt = 0
                     logger.info("Connected to backend")
+                    await self._send_hello(ws)
 
                     await self._receive_loop(ws)
             except asyncio.CancelledError:

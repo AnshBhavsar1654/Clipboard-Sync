@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import pytest
-from fastapi.testclient import TestClient
 
 from server.auth import TrustStore
-from server.hub import SyncHub
-from server.main import app, hub
+from server.main import hub
 
 
 @pytest.fixture(autouse=True)
@@ -28,8 +26,8 @@ def reset_server_hub(tmp_path):
     hub._trust.require_pin = True
 
 
-def test_rest_endpoints_and_static() -> None:
-    client = TestClient(app)
+def test_rest_endpoints_and_static(client) -> None:
+
 
     # Test static web app HTML served at root
     response = client.get("/")
@@ -44,8 +42,8 @@ def test_rest_endpoints_and_static() -> None:
     assert data["connection_count"] == 0
 
 
-def test_websocket_broadcast_and_history_onboarding() -> None:
-    client = TestClient(app)
+def test_websocket_broadcast_and_history_onboarding(client) -> None:
+
 
     # Connect Device A (e.g. Windows Laptop)
     with client.websocket_connect("/ws") as ws_a:
@@ -82,8 +80,8 @@ def test_websocket_broadcast_and_history_onboarding() -> None:
             assert initial_c["items"][0]["content"] == "Hello across devices!"
 
 
-def test_consecutive_deduplication() -> None:
-    client = TestClient(app)
+def test_consecutive_deduplication(client) -> None:
+
 
     with client.websocket_connect("/ws") as ws_1:
         ws_1.receive_json()  # consume initial history
@@ -102,8 +100,8 @@ def test_consecutive_deduplication() -> None:
     assert data["items"][0]["content"] == "Duplicate Clip"
 
 
-def test_file_upload_endpoint() -> None:
-    client = TestClient(app)
+def test_file_upload_endpoint(client) -> None:
+
     files = {"file": ("test_doc.txt", b"Sample file content for cross device sync", "text/plain")}
     response = client.post("/api/upload", files=files)
     assert response.status_code == 200
@@ -133,8 +131,8 @@ def test_trust_store_persistence(tmp_path) -> None:
     assert not reloaded.is_trusted("Device-A")
 
 
-def test_new_device_requires_pin_and_is_remembered() -> None:
-    client = TestClient(app)
+def test_new_device_requires_pin_and_is_remembered(client) -> None:
+
     hub._trust.require_pin = True
 
     with client.websocket_connect("/ws") as ws:
@@ -173,8 +171,8 @@ def test_new_device_requires_pin_and_is_remembered() -> None:
         assert hist2["items"][0]["content"] == "from phone"
 
 
-def test_trusted_device_skips_pin() -> None:
-    client = TestClient(app)
+def test_trusted_device_skips_pin(client) -> None:
+
     hub._trust.require_pin = True
     hub._trust.trust("Phone-XYZ")
 
@@ -186,8 +184,8 @@ def test_trusted_device_skips_pin() -> None:
         assert hist["type"] == "history"
 
 
-def test_open_mode_skips_pin() -> None:
-    client = TestClient(app)
+def test_open_mode_skips_pin(client) -> None:
+
     hub._trust.require_pin = False
 
     with client.websocket_connect("/ws") as ws:
@@ -196,8 +194,8 @@ def test_open_mode_skips_pin() -> None:
         assert initial["items"] == []
 
 
-def test_folder_broadcast_and_history() -> None:
-    client = TestClient(app)
+def test_folder_broadcast_and_history(client) -> None:
+
 
     with client.websocket_connect("/ws") as ws_a:
         ws_a.receive_json()  # history
@@ -223,9 +221,9 @@ def test_folder_broadcast_and_history() -> None:
     assert hist["items"][-1]["type"] == "folder"
 
 
-def test_upload_streams_and_download_supports_range(tmp_path) -> None:
+def test_upload_streams_and_download_supports_range(tmp_path, client) -> None:
     from server.main import UPLOADS_DIR
-    client = TestClient(app)
+
     big = b"A" * (2 * 1024 * 1024)  # 2 MB exercises chunked path
     resp = client.post(
         "/api/upload",

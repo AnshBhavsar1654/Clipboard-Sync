@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import socket
 import sys
 from typing import Any
 
@@ -20,17 +19,9 @@ logger = logging.getLogger("clipboardsync_runner")
 
 def get_local_lan_ip() -> str:
     """Determine the primary IPv4 local network LAN routing address."""
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            # Does not transmit data over the Internet; discovers active networking interface IP
-            s.connect(("8.8.8.8", 80))
-            return str(s.getsockname()[0])
-    except Exception:
-        try:
-            hostname = socket.gethostname()
-            return str(socket.gethostbyname(hostname))
-        except Exception:
-            return "127.0.0.1"
+    from server.net import primary_lan_ip
+
+    return primary_lan_ip()
 
 
 def print_pairing_instructions(port: int) -> None:
@@ -76,6 +67,9 @@ def print_pairing_instructions(port: int) -> None:
 
 async def async_run_all(port: int = 8000) -> None:
     """Concurrently operate the FastAPI WebSocket engine and native Win32 client."""
+    from server.net import find_open_port
+
+    port = find_open_port(port)
     print_pairing_instructions(port)
 
     # Configure and start Uvicorn sync backend
@@ -123,7 +117,13 @@ def main() -> None:
     """CLI launcher entrypoint."""
     if sys.platform != "win32":
         print("ClipBoardSync works best on Windows for clipboard sharing.", file=sys.stderr)
-    
+
+    from server.net import ensure_single_instance
+
+    if not ensure_single_instance():
+        print("ClipBoardSync is already running. Use the open window.", file=sys.stderr)
+        sys.exit(0)
+
     try:
         asyncio.run(async_run_all())
     except KeyboardInterrupt:

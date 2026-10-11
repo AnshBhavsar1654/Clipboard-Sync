@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import pytest
-from fastapi.testclient import TestClient
 
 from server.auth import TrustStore
-from server.main import STATIC_DIR, UPLOADS_DIR, app, hub
+from server.main import STATIC_DIR, UPLOADS_DIR, hub
 
 
 @pytest.fixture()
@@ -51,8 +50,8 @@ def open_hub(tmp_path):
 # -- plan §1.6: file_url validation -------------------------------------------
 
 
-def test_hub_drops_untrusted_file_url(open_hub):
-    c = TestClient(app)
+def test_hub_drops_untrusted_file_url(open_hub, client):
+    c = client
     with c.websocket_connect("/ws") as ws_a:
         ws_a.receive_json()
         with c.websocket_connect("/ws") as ws_b:
@@ -90,8 +89,8 @@ def test_is_allowed_file_url_shapes():
 # -- plan §1.2: WS cookie auth --------------------------------------------------
 
 
-def test_websocket_cookie_auth_skips_pin(locked_hub):
-    c = TestClient(app)
+def test_websocket_cookie_auth_skips_pin(locked_hub, client):
+    c = client
     r = c.post("/api/pair", json={"pin": locked_hub._trust.pairing_pin, "name": "Pixel"})
     assert r.status_code == 200
     with c.websocket_connect("/ws") as ws:
@@ -102,8 +101,8 @@ def test_websocket_cookie_auth_skips_pin(locked_hub):
 # -- plan §1.4: cross-site write rejection --------------------------------------
 
 
-def test_cross_site_post_blocked(locked_hub):
-    c = TestClient(app)
+def test_cross_site_post_blocked(locked_hub, client):
+    c = client
     evil = c.post(
         "/api/pair",
         json={"pin": "000000"},
@@ -118,10 +117,10 @@ def test_cross_site_post_blocked(locked_hub):
 # -- plan §1.5: uploads outside the static mount --------------------------------
 
 
-def test_uploads_not_served_from_static():
+def test_uploads_not_served_from_static(client):
     assert UPLOADS_DIR.resolve() not in STATIC_DIR.resolve().parents
     assert UPLOADS_DIR.resolve() != STATIC_DIR.resolve()
-    c = TestClient(app)
+    c = client
     assert c.get("/uploads/anything.bat").status_code == 404
 
 

@@ -5,10 +5,9 @@ from __future__ import annotations
 import io
 
 import pytest
-from fastapi.testclient import TestClient
 
 from server.auth import TrustStore
-from server.main import app, hub
+from server.main import hub
 
 
 def _png_bytes(size=(64, 64), color=(200, 30, 30)) -> bytes:
@@ -42,8 +41,8 @@ def open_hub(tmp_path):
 # -- server: upload thumbs ------------------------------------------------------
 
 
-def test_upload_returns_thumb_for_images(open_hub):
-    c = TestClient(app)
+def test_upload_returns_thumb_for_images(open_hub, client):
+    c = client
     r = c.post(
         "/api/upload",
         files={"file": ("shot.png", _png_bytes(), "image/png")},
@@ -56,8 +55,8 @@ def test_upload_returns_thumb_for_images(open_hub):
     assert len(data["thumb"]) <= 24 * 1024 + 100
 
 
-def test_upload_has_no_thumb_for_plain_files(open_hub):
-    c = TestClient(app)
+def test_upload_has_no_thumb_for_plain_files(open_hub, client):
+    c = client
     r = c.post("/api/upload", files={"file": ("a.txt", b"hi")})
     assert r.status_code == 200
     assert "thumb" not in r.json()
@@ -74,8 +73,8 @@ def test_make_thumb_rejects_non_images():
 # -- server: oversize socket payloads dropped ------------------------------------
 
 
-def test_hub_drops_oversize_text(open_hub):
-    c = TestClient(app)
+def test_hub_drops_oversize_text(open_hub, client):
+    c = client
     with c.websocket_connect("/ws") as ws:
         ws.receive_json()
         ws.send_json({"device_id": "d", "type": "text", "content": "x" * (300 * 1024)})
