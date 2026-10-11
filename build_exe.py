@@ -80,6 +80,10 @@ def build(mode: str, target: str) -> int:
         "-m",
         "PyInstaller",
         "--name", name,
+    ]
+    if target == "gui":
+        pyinstaller_args += ["--windowed", "--noconsole"]
+    pyinstaller_args += [
         "--onedir" if mode == "onedir" else "--onefile",
         f"--add-data=server/static{sep}server/static",
         asset_arg,
@@ -102,8 +106,6 @@ def build(mode: str, target: str) -> int:
         "--noconfirm",
         entry,
     ]
-    if target == "gui":
-        pyinstaller_args[4:4] = ["--windowed", "--noconsole"]
 
     print(f"Running: {' '.join(pyinstaller_args)}\n")
 
