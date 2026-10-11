@@ -123,10 +123,11 @@ class ClipBoardSyncApp:
                         logger.warning("Upload failed for %s: %s", filename, resp.status_code)
                         return False
                     payload = resp.json()
+                    # Keep the URL relative (/api/files/<id>): each device
+                    # resolves it against its own server. Absolutizing here
+                    # would bake in this computer's loopback address, which
+                    # is unreachable (and origin-mismatched) everywhere else.
                     file_url = payload.get("url", "")
-                    # Store absolute URL so a second PC can download directly
-                    if file_url.startswith("/"):
-                        file_url = f"{self._http_base()}{file_url}"
                     label = "Folder" if item_type == "folder" else "File"
                     content_label = f"{label}: {payload.get('filename')}"
                     if entry_count is not None:
@@ -184,9 +185,8 @@ class ClipBoardSyncApp:
         payload = await self._upload_bytes(data, filename, "image")
         if not payload:
             return False
+        # Relative URL: resolvable by every device (see _upload_path).
         file_url = payload.get("url", "")
-        if file_url.startswith("/"):
-            file_url = f"{self._http_base()}{file_url}"
         await self._websocket.send_clipboard_update(
             content=f"Image: {payload.get('filename', filename)}",
             content_type="image",

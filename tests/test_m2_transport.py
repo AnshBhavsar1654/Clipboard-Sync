@@ -141,6 +141,51 @@ async def test_share_image_sends_metadata_not_pixels(tmp_path, monkeypatch):
     assert "base64" not in msg["content"]  # small label, not pixels
 
 
+@pytest.mark.asyncio
+async def test_shared_file_url_stays_relative(tmp_path, monkeypatch):
+    """Shared file_urls must be relative: absolutizing against this computer's
+    loopback address makes them unreachable (and origin-mismatched, so the
+    phone falls back to the tiny thumbnail) on every other device."""
+    app_ = _make_app(tmp_path)
+    sent: list = []
+    src = tmp_path / "a.bin"
+    src.write_bytes(b"012")
+
+    class _FakeResp:
+        status_code = 200
+
+        def json(self):
+            return {"url": "/api/files/ab12cd34ef56.bin", "filename": "a.bin", "filesize": 3}
+
+    class _FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, *a, **k):
+            return _FakeResp()
+
+    async def _capture(**kwargs):
+        sent.append(kwargs)
+
+    monkeypatch.setattr("httpx.AsyncClient", _FakeClient)
+    monkeypatch.setattr(app_._websocket, "send_clipboard_update", _capture)
+    try:
+        assert await app_._upload_path(str(src), "a.bin", "file") is True
+        assert await app_._share_image_bytes(b"012", "a.png") is True
+    finally:
+        app_._clipboard.stop()
+    assert len(sent) == 2
+    for msg in sent:
+        assert msg["file_url"] == "/api/files/ab12cd34ef56.bin"
+        assert "127.0.0.1" not in msg["file_url"]
+
+
 # -- client: incoming shares land on the clipboard ---------------------------------
 
 

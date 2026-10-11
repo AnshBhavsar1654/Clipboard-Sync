@@ -540,16 +540,26 @@ document.addEventListener("DOMContentLoaded", () => {
                         <img src="${imgSrc}" data-full="${fullSrc || imgSrc}" class="card-image-preview" alt="Shared photo" loading="lazy" />
                     </div>
                 `;
-                actionBtnHtml = `
-                    <a href="${fullSrc || imgSrc}" download="${escapeHtml(item.filename || "shared_photo.png")}" class="copy-btn link-btn" target="_blank" rel="noopener">
-                        <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none">
-                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                            <polyline points="7 10 12 15 17 10"></polyline>
-                            <line x1="12" y1="15" x2="12" y2="3"></line>
-                        </svg>
-                        <span>Save photo</span>
-                    </a>
-                `;
+                if (fullSrc) {
+                    actionBtnHtml = `
+                        <a href="${fullSrc}" download="${escapeHtml(item.filename || "shared_photo.png")}" class="copy-btn link-btn" target="_blank" rel="noopener">
+                            <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                <polyline points="7 10 12 15 17 10"></polyline>
+                                <line x1="12" y1="15" x2="12" y2="3"></line>
+                            </svg>
+                            <span>Save photo</span>
+                        </a>
+                    `;
+                } else {
+                    // Preview only: never offer the thumbnail as the download,
+                    // or the saved file comes out tiny (≤24 KB).
+                    console.warn("Photo has no downloadable full file:", fullRaw);
+                    actionBtnHtml = `
+                        <span class="copy-btn link-btn" aria-disabled="true">
+                            <span>Full photo unavailable — share it again</span>
+                        </span>`;
+                }
             }
         } else if (itemType === "file" || itemType === "folder") {
             const fname = item.filename || (itemType === "folder" ? "Folder.zip" : "File");
