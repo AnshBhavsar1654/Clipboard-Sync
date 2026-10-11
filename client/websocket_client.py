@@ -105,6 +105,7 @@ class WebSocketClient:
         file_url: str | None = None,
         entry_count: int | None = None,
         skipped_count: int | None = None,
+        thumb: str | None = None,
     ) -> None:
         """Queue a clipboard update for transmission to the backend."""
         message: dict[str, Any] = {
@@ -119,6 +120,8 @@ class WebSocketClient:
             message["filesize"] = filesize
         if file_url:
             message["file_url"] = file_url
+        if thumb:
+            message["thumb"] = thumb
         if entry_count is not None:
             message["entry_count"] = entry_count
         if skipped_count is not None:

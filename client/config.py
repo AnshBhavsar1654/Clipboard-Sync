@@ -16,6 +16,59 @@ DEFAULT_RECONNECT_BASE_DELAY = 1.0
 DEFAULT_RECONNECT_MAX_DELAY = 60.0
 DEFAULT_CONFIG_DIR = Path.home() / ".clipboardsync"
 
+AUTO_RECEIVE_MAX_BYTES = 50 * 1024 * 1024  # default auto-download cap (plan §2.7)
+
+
+@dataclass
+class ReceivePrefs:
+    """How incoming shares land on this computer (plan §2.7). Stored in
+    ``prefs.json`` next to the device id; missing keys fall back to defaults."""
+
+    receive_folder: str = ""  # "" = ~/Downloads/ClipBoardSync
+    auto_receive_max_bytes: int = AUTO_RECEIVE_MAX_BYTES
+    put_received_on_clipboard: bool = True
+
+
+def load_prefs(config_dir: Path) -> ReceivePrefs:
+    """Read receive prefs tolerantly (bad file -> defaults)."""
+    try:
+        data = json.loads((Path(config_dir) / "prefs.json").read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return ReceivePrefs()
+        prefs = ReceivePrefs()
+        if isinstance(data.get("receive_folder"), str):
+            prefs.receive_folder = data["receive_folder"]
+        try:
+            prefs.auto_receive_max_bytes = max(
+                0, int(data.get("auto_receive_max_bytes", prefs.auto_receive_max_bytes))
+            )
+        except (TypeError, ValueError):
+            pass
+        if isinstance(data.get("put_received_on_clipboard"), bool):
+            prefs.put_received_on_clipboard = data["put_received_on_clipboard"]
+        return prefs
+    except (OSError, ValueError):
+        return ReceivePrefs()
+
+
+def save_prefs(config_dir: Path, prefs: ReceivePrefs) -> None:
+    """Persist receive prefs (best effort)."""
+    try:
+        Path(config_dir).mkdir(parents=True, exist_ok=True)
+        (Path(config_dir) / "prefs.json").write_text(
+            json.dumps(
+                {
+                    "receive_folder": prefs.receive_folder,
+                    "auto_receive_max_bytes": prefs.auto_receive_max_bytes,
+                    "put_received_on_clipboard": prefs.put_received_on_clipboard,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        logger.warning("Could not save prefs: %s", exc)
+
 
 @dataclass
 class Config:

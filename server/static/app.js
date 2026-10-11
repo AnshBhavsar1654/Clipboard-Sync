@@ -194,9 +194,11 @@ document.addEventListener("DOMContentLoaded", () => {
                     try { resolve(JSON.parse(xhr.responseText)); }
                     catch (err) { reject(new Error("Bad server reply")); }
                 } else if (xhr.status === 413) {
-                    reject(new Error("Too big (over 2 GB)"));
+                    reject(Object.assign(new Error("Too big (over 2 GB)"), { status: 413 }));
+                } else if (xhr.status === 401 || xhr.status === 403) {
+                    reject(Object.assign(new Error("Pair this phone first"), { status: xhr.status }));
                 } else {
-                    reject(new Error(`Upload failed (${xhr.status})`));
+                    reject(Object.assign(new Error(`Upload failed (${xhr.status})`), { status: xhr.status }));
                 }
             };
             xhr.onerror = () => reject(new Error("Connection lost"));
@@ -343,11 +345,12 @@ document.addEventListener("DOMContentLoaded", () => {
                 device_id: deviceId,
                 timestamp: new Date().toISOString(),
                 type: itemType,
-                content: itemType === "image" ? data.url : `${itemType === "folder" ? "Folder" : "File"}: ${data.filename}`,
+                content: itemType === "image" ? `Image: ${data.filename}` : `${itemType === "folder" ? "Folder" : "File"}: ${data.filename}`,
                 filename: data.filename,
                 filesize: data.filesize,
                 file_url: data.url
             };
+            if (data.thumb) payload.thumb = data.thumb;
             if (data.entry_count != null) payload.entry_count = data.entry_count;
             else if (entryCount != null) payload.entry_count = entryCount;
             if (data.skipped_count != null) payload.skipped_count = data.skipped_count;
@@ -361,6 +364,11 @@ document.addEventListener("DOMContentLoaded", () => {
         } catch (err) {
             hideUploadProgress();
             console.error("Upload failed:", err);
+            if (err && (err.status === 401 || err.status === 403)) {
+                showAuthScreen();
+                showToast("Pair this phone first — enter the code.", "info");
+                return;
+            }
             const msg = /over 2 GB|too big/i.test(String(err && err.message)) ? String(err.message) : "Could not share that file. Try again.";
             showToast(msg, "info");
         }
@@ -437,8 +445,10 @@ document.addEventListener("DOMContentLoaded", () => {
         let actionBtnHtml = "";
 
         if (itemType === "image") {
-            const rawSrc = item.content && item.content.startsWith("data:image/") ? item.content : (item.file_url || item.content);
-            const imgSrc = safeFileUrl(rawSrc);
+            const fullRaw = (item.content && item.content.startsWith("data:image/") ? item.content : null)
+                || item.file_url || item.content;
+            const fullSrc = safeFileUrl(fullRaw);
+            const imgSrc = safeFileUrl(item.thumb) || fullSrc;
             if (!imgSrc) {
                 bodyHtml = `<p class="clip-content">${escapeHtml("This photo couldn't be shown (unsupported link).")}</p>`;
             } else {
@@ -448,7 +458,7 @@ document.addEventListener("DOMContentLoaded", () => {
                     </div>
                 `;
                 actionBtnHtml = `
-                    <a href="${imgSrc}" download="${escapeHtml(item.filename || "shared_photo.png")}" class="copy-btn link-btn" target="_blank" rel="noopener">
+                    <a href="${fullSrc || imgSrc}" download="${escapeHtml(item.filename || "shared_photo.png")}" class="copy-btn link-btn" target="_blank" rel="noopener">
                         <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none">
                             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
                             <polyline points="7 10 12 15 17 10"></polyline>

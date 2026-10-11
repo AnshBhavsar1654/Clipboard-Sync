@@ -1551,22 +1551,50 @@ class ClipBoardSyncGUI(ctk.CTk):
         try:
             path = Path(filepath)
             raw = path.read_bytes()
-            ext = path.suffix.lower().replace(".", "")
-            if ext == "jpg":
-                ext = "jpeg"
-            b64_str = base64.b64encode(raw).decode("utf-8")
-            data_uri = f"data:image/{ext};base64,{b64_str}"
+            # Instant local paste without triggering an outbound sync (the
+            # monitor suppresses its own writes); the phone gets metadata.
+            try:
+                if self.engine._client_app is not None:
+                    self.engine._client_app._clipboard.set_image_from_bytes(raw)
+                    self.log_queue.put("[Info] Photo copied. Ready to paste with Ctrl+V.")
+            except Exception:
+                pass
+            threading.Thread(
+                target=self._send_image_worker,
+                args=(str(path),),
+                name="clipboardsync-photo-upload",
+                daemon=True,
+            ).start()
+        except Exception as exc:
+            self.log_queue.put(f"[Error] Could not share the photo: {exc}")
 
-            self.copy_image_to_local(data_uri)
-
+    def _send_image_worker(self, filepath: str) -> None:
+        """Upload a photo (streamed) then broadcast metadata only (plan §2.2)."""
+        try:
+            import httpx
+            path = Path(filepath)
+            url = f"http://127.0.0.1:{self.port}/api/upload"
+            with httpx.Client(timeout=300.0) as client:
+                with open(path, "rb") as f:
+                    resp = client.post(
+                        url,
+                        files={"file": (path.name, f)},
+                        data={"item_type": "image"},
+                    )
+            if resp.status_code != 200:
+                self.log_queue.put(f"[Error] Could not share the photo (HTTP {resp.status_code}).")
+                return
+            data = resp.json()
             from server.models import ClipboardItem, get_utc_now_iso
             item = ClipboardItem(
                 device_id="This computer",
                 timestamp=get_utc_now_iso(),
                 type="image",
-                content=data_uri,
-                filename=path.name,
-                filesize=len(raw),
+                content=f"Image: {data.get('filename', path.name)}",
+                filename=data.get("filename", path.name),
+                filesize=data.get("filesize", path.stat().st_size),
+                file_url=data.get("url", ""),
+                thumb=data.get("thumb"),
             )
             self._broadcast_item(item.to_message_dict())
             self.log_queue.put(f"[Info] Shared photo '{path.name}' with your phone.")

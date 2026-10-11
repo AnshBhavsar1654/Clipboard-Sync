@@ -138,6 +138,7 @@ async def pair_device(request: Request, response: Response, body: dict) -> dict[
 
 @app.post("/api/upload", dependencies=[Depends(require_device)])
 async def upload_file_endpoint(
+    request: Request,
     file: UploadFile = File(...),
     item_type: str | None = Form(default=None),
     entry_count: int | None = Form(default=None),
@@ -145,6 +146,18 @@ async def upload_file_endpoint(
 ) -> dict[str, Any]:
     """Stream an upload to disk (never fully in RAM) and return a fast download link."""
     import uuid
+
+    # Early reject from Content-Length before reading anything (plan §2.14).
+    try:
+        claimed = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        claimed = 0
+    if claimed > MAX_UPLOAD_BYTES:
+        return JSONResponse(
+            status_code=413,
+            content={"detail": "That file is too big to share (over 2 GB)."},
+        )
+
     original_name = _sanitize_filename(file.filename or "file")
     ext = Path(original_name).suffix
     stored_name = f"{uuid.uuid4().hex[:10]}{ext}"
@@ -167,6 +180,9 @@ async def upload_file_endpoint(
                         content={"detail": "That file is too big to share (over 2 GB)."},
                     )
                 out.write(chunk)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)  # client abort must not leave .part (plan §2.14)
+        return JSONResponse(status_code=400, content={"detail": "Upload interrupted. Try again."})
     finally:
         try:
             await file.close()
@@ -179,8 +195,6 @@ async def upload_file_endpoint(
         resolved_type = item_type
     else:
         resolved_type = "image" if mime.startswith("image/") or ext.lower() in (".png", ".jpg", ".jpeg", ".gif", ".webp") else "file"
-        if original_name.lower().endswith(".zip") and resolved_type == "file":
-            pass
     relative_url = f"/api/files/{stored_name}"
 
     logger.info("Uploaded %s (%d bytes) saved as %s", resolved_type, total, stored_name)
@@ -195,6 +209,17 @@ async def upload_file_endpoint(
         payload["entry_count"] = entry_count
     if skipped_count is not None:
         payload["skipped_count"] = skipped_count
+    # Instant list rendering for every sender (plan §2.2): small images get a
+    # ≤24 KB thumb; full bytes stay behind /api/files/{id}.
+    if resolved_type == "image" and 0 < total <= 25 * 1024 * 1024:
+        try:
+            from server.media import make_thumb
+
+            thumb = make_thumb(dest_path.read_bytes())
+            if thumb:
+                payload["thumb"] = thumb
+        except Exception:
+            pass
     return payload
 
 

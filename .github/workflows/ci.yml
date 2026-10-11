@@ -25,7 +25,7 @@ jobs:
         # Lint the new/extracted modules. Extend to `ruff check .` once
         # remaining phases clear pre-existing violations in server/hub.py,
         # server/main.py, server/discovery.py, gui/ and legacy client code.
-        run: ruff check client/clipboard_backend.py client/clipboard.py tests/test_regressions.py tests/test_m1_fixes.py server/auth.py server/filenames.py
+        run: ruff check client/clipboard_backend.py client/clipboard.py client/config.py tests/test_regressions.py tests/test_m1_fixes.py tests/test_m2_transport.py server/auth.py server/filenames.py server/media.py
 
       - name: Test (pytest)
         run: pytest -q

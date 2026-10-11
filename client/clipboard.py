@@ -187,16 +187,19 @@ class ClipboardMonitor:
                 b64_str = b64_data_uri
 
             raw_bytes = base64.b64decode(b64_str)
-
-            with self._state_lock:
-                self._suppress_next_change = True
-
-            self._backend.write_image_bytes(raw_bytes)
-            self._note_own_write({"type": "image", "content": b64_data_uri})
-
-            logger.info("Set image (%d bytes) to clipboard programmatically", len(raw_bytes))
+            self.set_image_from_bytes(raw_bytes)
         except Exception as exc:
             logger.warning("Failed to write image to clipboard: %s", exc)
+
+    def set_image_from_bytes(self, raw_bytes: bytes) -> None:
+        """Write decoded image bytes to the clipboard (plan §2.7)."""
+        with self._state_lock:
+            self._suppress_next_change = True
+
+        self._backend.write_image_bytes(bytes(raw_bytes))
+        self._note_own_write({"type": "image", "content": ""})
+
+        logger.info("Set image (%d bytes) to clipboard programmatically", len(raw_bytes))
 
     def set_files(self, paths: list[Path]) -> None:
         """Put files on the clipboard as CF_HDROP (Phase 2.7 helper, via backend)."""

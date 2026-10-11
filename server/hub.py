@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 
 MAX_AUTH_FAILURES = MAX_PIN_FAILS
 
+# The socket carries metadata only (plan §2.2): bytes go through /api/upload.
+# Anything bigger is a legacy blob or abuse — dropped, never stored.
+MAX_MESSAGE_BYTES = 256 * 1024
+
 # Only URLs this server handed out via /api/upload are forwarded (plan §1.6).
 # The desktop client uploads bytes first and shares metadata, so a file_url
 # of any other shape (javascript:, http://evil/…) is dropped, never forwarded.
@@ -249,6 +253,13 @@ class SyncHub:
             logger.warning("Received unsupported message format: %s", message)
             return
 
+        if isinstance(content, str) and len(content.encode("utf-8", "ignore")) > MAX_MESSAGE_BYTES:
+            logger.warning(
+                "Dropping oversize %s clip from '%s' (%d chars): share bytes via /api/upload.",
+                content_type, device_id, len(content),
+            )
+            return
+
         # Never forward a file_url this server did not hand out (plan §1.6):
         # javascript:… runs script on the phone, http://evil/… pulls malware
         # onto the desktop. Relative links stay relative so PC-to-PC relays
@@ -262,6 +273,10 @@ class SyncHub:
         if isinstance(filename, str) and len(filename) > _MAX_FILENAME_LEN:
             filename = filename[:_MAX_FILENAME_LEN]
 
+        thumb = message.get("thumb")
+        if not isinstance(thumb, str) or len(thumb) > 64 * 1024 or not thumb.startswith("data:image/"):
+            thumb = None
+
         item = ClipboardItem(
             device_id=device_id,
             timestamp=message.get("timestamp") or get_utc_now_iso(),
@@ -272,6 +287,7 @@ class SyncHub:
             file_url=file_url,
             entry_count=message.get("entry_count"),
             skipped_count=message.get("skipped_count"),
+            thumb=thumb,
         )
 
         async with self._lock:
@@ -286,9 +302,17 @@ class SyncHub:
         payload = item.to_message_dict()
         logger.info("Broadcasting clipboard clip (%s) from device '%s' to %d peers", content_type, device_id, len(peers))
 
-        for ws in peers:
+        # One slow phone must not delay the rest, and a failing peer must not
+        # disturb iteration over the others (plan §2.14).
+        async def _send_to(ws: WebSocket) -> WebSocket | None:
             try:
                 await ws.send_json(payload)
+                return None
             except Exception as exc:
                 logger.warning("Error broadcasting to peer: %s", exc)
+                return ws
+
+        failed = await asyncio.gather(*(_send_to(ws) for ws in peers))
+        for ws in failed:
+            if ws is not None:
                 await self.disconnect(ws)

@@ -26,6 +26,7 @@ class ClipboardItem(BaseModel):
     file_url: str | None = None
     entry_count: int | None = None
     skipped_count: int | None = None
+    thumb: str | None = None  # ≤24 KB data-URI preview (plan §2.2)
 
     def to_message_dict(self) -> dict[str, Any]:
         """Convert to standard broadcast dictionary payload."""
@@ -46,6 +47,8 @@ class ClipboardItem(BaseModel):
             data["entry_count"] = self.entry_count
         if self.skipped_count is not None:
             data["skipped_count"] = self.skipped_count
+        if self.thumb is not None:
+            data["thumb"] = self.thumb
         return data
 
 
