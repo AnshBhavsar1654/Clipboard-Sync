@@ -17,6 +17,7 @@ def _reset_hub_state() -> None:
     hub._auth_failures.clear()
     hub._hosts.clear()
     hub._devices.clear()
+    hub._last_seen.clear()
     hub._pinned.clear()
 
 

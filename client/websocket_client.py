@@ -48,6 +48,7 @@ class WebSocketClient:
 
         self._connection_task: asyncio.Task[None] | None = None
         self._sender_task: asyncio.Task[None] | None = None
+        self._heartbeat_task: asyncio.Task[None] | None = None
 
     @property
     def is_connected(self) -> bool:
@@ -58,6 +59,21 @@ class WebSocketClient:
         # 1 MiB default, which dropped the client with code 1009 in a
         # reconnect loop (plan §2.1). Bytes travel through /api/files anyway.
         return {"max_size": None, "ping_interval": 20, "ping_timeout": 20}
+
+    async def _heartbeat_loop(self) -> None:
+        """App-level ping every 25 s so the server's silent-socket sweep
+        (plan §3.3) never mistakes this computer for a dead phone."""
+        while self._running:
+            try:
+                await asyncio.sleep(25)
+            except asyncio.CancelledError:
+                raise
+            if not self._running or not self._connection or not self.is_connected:
+                continue
+            try:
+                await self._connection.send(json.dumps({"type": "ping"}))
+            except Exception:
+                pass
 
     async def _send_hello(self, ws: ClientConnection) -> None:
         """Identify this computer for the hub device list (plan §2.10)."""
@@ -91,6 +107,10 @@ class WebSocketClient:
             self._sender_loop(),
             name="websocket-sender",
         )
+        self._heartbeat_task = asyncio.create_task(
+            self._heartbeat_loop(),
+            name="websocket-heartbeat",
+        )
         logger.info("WebSocket client started (url=%s)", self._url)
 
     async def stop(self) -> None:
@@ -102,7 +122,7 @@ class WebSocketClient:
             await self._connection.close()
             self._connection = None
 
-        for task in (self._connection_task, self._sender_task):
+        for task in (self._connection_task, self._sender_task, self._heartbeat_task):
             if task:
                 task.cancel()
                 try:
@@ -112,6 +132,7 @@ class WebSocketClient:
 
         self._connection_task = None
         self._sender_task = None
+        self._heartbeat_task = None
         logger.info("WebSocket client stopped")
 
     async def send_clipboard_update(

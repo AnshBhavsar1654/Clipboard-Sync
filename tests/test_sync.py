@@ -9,7 +9,7 @@ from server.main import hub
 
 
 @pytest.fixture(autouse=True)
-def reset_server_hub(tmp_path):
+def reset_server_hub(tmp_path, monkeypatch):
     """Reset the in-memory sync hub and isolate the trust store between tests."""
     store = TrustStore(tmp_path / "server_state.json")
     store.require_pin = False  # legacy tests assume open mode
@@ -18,6 +18,8 @@ def reset_server_hub(tmp_path):
     hub._history.clear()
     hub._auth.clear()
     hub._auth_failures.clear()
+    monkeypatch.setattr("server.main.UPLOADS_DIR", tmp_path / "shared")
+    (tmp_path / "shared").mkdir(parents=True, exist_ok=True)
     yield
     hub._connections.clear()
     hub._history.clear()

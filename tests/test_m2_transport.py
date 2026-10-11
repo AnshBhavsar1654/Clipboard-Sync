@@ -19,7 +19,7 @@ def _png_bytes(size=(64, 64), color=(200, 30, 30)) -> bytes:
 
 
 @pytest.fixture()
-def open_hub(tmp_path):
+def open_hub(tmp_path, monkeypatch):
     store = TrustStore(tmp_path / "state.json")
     store.require_pin = False
     old_trust = hub._trust
@@ -29,6 +29,8 @@ def open_hub(tmp_path):
     hub._auth.clear()
     hub._auth_failures.clear()
     hub._hosts.clear()
+    (tmp_path / "shared").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("server.main.UPLOADS_DIR", tmp_path / "shared")
     yield hub
     hub._connections.clear()
     hub._history.clear()

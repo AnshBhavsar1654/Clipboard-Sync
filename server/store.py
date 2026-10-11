@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import sqlite3
 import sys
 import time
@@ -175,4 +176,25 @@ def sweep_uploads(uploads_dir: Path, keep_ids: set[str]) -> int:
             logger.debug("Janitor could not remove %s: %s", path, exc)
     if removed:
         logger.info("Janitor removed %d orphaned shared file(s).", removed)
+    return removed
+
+
+STAGING_MAX_AGE_SECONDS = 3600
+
+
+def sweep_staging(uploads_dir: Path) -> int:
+    """Remove abandoned folder-assembly staging dirs (plan §3.5)."""
+    staging = uploads_dir / ".staging"
+    try:
+        entries = list(staging.iterdir())
+    except OSError:
+        return 0
+    removed, now = 0, time.time()
+    for path in entries:
+        try:
+            if path.is_dir() and now - path.stat().st_mtime > STAGING_MAX_AGE_SECONDS:
+                shutil.rmtree(path, ignore_errors=True)
+                removed += 1
+        except OSError as exc:
+            logger.debug("Janitor could not remove staging %s: %s", path, exc)
     return removed

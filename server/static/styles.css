@@ -815,3 +815,65 @@ textarea:focus-visible,
 .link-btn {
   text-decoration: none;
 }
+
+/* Per-item actions (plan §3.6) */
+.mini-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--ink-soft);
+  border-radius: var(--radius-sm);
+  font-size: 0.78rem;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.mini-btn:hover {
+  color: var(--ink);
+  border-color: var(--border-strong);
+}
+
+.mini-btn.danger {
+  color: var(--danger);
+}
+
+.clip-card.pinned {
+  border-color: var(--primary);
+}
+
+/* Lightbox viewer */
+.lightbox {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 24px;
+}
+
+.lightbox[hidden] {
+  display: none;
+}
+
+.lightbox-img {
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: var(--radius);
+}
+
+/* Accessibility: visible focus + reduced motion (plan §3.6) */
+:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}

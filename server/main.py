@@ -54,7 +54,8 @@ async def require_device(request: Request) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup sweep + 10-minute janitor for orphaned shared files (plan §2.9)."""
+    """Background hygiene (plan §2.9/§3.3): silent-socket sweep every 30 s,
+    orphaned-file sweep every 10 min."""
     if hub.uploads_dir is None:
         hub.uploads_dir = UPLOADS_DIR
     hub._sweep_uploads()
@@ -62,14 +63,21 @@ async def lifespan(app: FastAPI):
 
     async def _janitor() -> None:
         try:
+            ticks = 0
             while not stop.is_set():
                 try:
-                    await asyncio.wait_for(stop.wait(), timeout=600)
+                    await asyncio.wait_for(stop.wait(), timeout=30)
                 except TimeoutError:
                     pass
                 if stop.is_set():
                     break
-                hub._sweep_uploads()
+                ticks += 1
+                try:
+                    await hub.close_silent_sockets()
+                except Exception as exc:
+                    logger.debug("Silent sweep failed: %s", exc)
+                if ticks % 20 == 0:
+                    hub._sweep_uploads()
         except asyncio.CancelledError:
             pass
 
@@ -157,6 +165,18 @@ async def get_devices() -> dict[str, Any]:
     return {"devices": devices, "connection_count": len(devices)}
 
 
+@app.get("/api/info")
+async def get_info() -> dict[str, Any]:
+    """Public computer info for the phone header (plan §3.6)."""
+    import socket as _socket
+
+    try:
+        name = _socket.gethostname()
+    except Exception:
+        name = "This computer"
+    return {"computer_name": name, "version": app.version}
+
+
 @app.delete("/api/history/{clip_id}", dependencies=[Depends(require_device)])
 async def delete_clip(clip_id: str) -> dict[str, Any]:
     """Delete one clip everywhere, including its file (plan §2.9/§3.6)."""
@@ -202,34 +222,20 @@ async def pair_device(request: Request, response: Response, body: dict) -> dict[
     return {"ok": True}
 
 
-@app.post("/api/upload", dependencies=[Depends(require_device)])
-async def upload_file_endpoint(
-    request: Request,
-    file: UploadFile = File(...),
-    item_type: str | None = Form(default=None),
-    entry_count: int | None = Form(default=None),
-    skipped_count: int | None = Form(default=None),
-) -> dict[str, Any]:
-    """Stream an upload to disk (never fully in RAM) and return a fast download link."""
-    import uuid
+_FOLDER_ID_RE = re.compile(r"[0-9a-f]{16,32}")
+FOLDER_MAX_BYTES = 1024 * 1024 * 1024  # 1 GB cap for phone folder shares
 
-    # Early reject from Content-Length before reading anything (plan §2.14).
-    try:
-        claimed = int(request.headers.get("content-length") or 0)
-    except ValueError:
-        claimed = 0
-    if claimed > MAX_UPLOAD_BYTES:
-        return JSONResponse(
-            status_code=413,
-            content={"detail": "That file is too big to share (over 2 GB)."},
-        )
 
-    original_name = _sanitize_filename(file.filename or "file")
-    ext = Path(original_name).suffix
-    stored_name = f"{uuid.uuid4().hex[:10]}{ext}"
-    dest_path = UPLOADS_DIR / stored_name
-    tmp_path = dest_path.with_suffix(dest_path.suffix + ".part")
+def _staging_dir(folder_id: str) -> Path:
+    return UPLOADS_DIR / ".staging" / folder_id
 
+
+async def _stream_upload(file: UploadFile, dest: Path) -> int:
+    """Stream an upload to ``dest`` via ``.part`` (never fully in RAM).
+
+    Returns bytes written. Aborts leave no ``.part`` behind (plan §2.14).
+    """
+    tmp_path = dest.with_suffix(dest.suffix + ".part")
     total = 0
     try:
         with tmp_path.open("wb") as out:
@@ -241,20 +247,61 @@ async def upload_file_endpoint(
                 if total > MAX_UPLOAD_BYTES:
                     out.close()
                     tmp_path.unlink(missing_ok=True)
-                    return JSONResponse(
+                    raise HTTPException(
                         status_code=413,
-                        content={"detail": "That file is too big to share (over 2 GB)."},
+                        detail="That file is too big to share (over 2 GB).",
                     )
                 out.write(chunk)
+    except HTTPException:
+        raise
     except Exception:
-        tmp_path.unlink(missing_ok=True)  # client abort must not leave .part (plan §2.14)
-        return JSONResponse(status_code=400, content={"detail": "Upload interrupted. Try again."})
+        tmp_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="Upload interrupted. Try again.")
     finally:
         try:
             await file.close()
         except Exception:
             pass
-    shutil.move(str(tmp_path), str(dest_path))
+    shutil.move(str(tmp_path), str(dest))
+    return total
+
+
+@app.post("/api/upload", dependencies=[Depends(require_device)])
+async def upload_file_endpoint(
+    request: Request,
+    file: UploadFile = File(...),
+    item_type: str | None = Form(default=None),
+    entry_count: int | None = Form(default=None),
+    skipped_count: int | None = Form(default=None),
+    folder_id: str | None = Form(default=None),
+    relpath: str | None = Form(default=None),
+) -> dict[str, Any]:
+    """Stream an upload to disk (never fully in RAM) and return a fast download link.
+
+    With ``folder_id`` + ``relpath`` the file is staged for a later
+    ``POST /api/folder/commit`` instead (plan §3.5: constant phone memory).
+    """
+    import uuid
+
+    # Early reject from Content-Length before reading anything (plan §2.14).
+    try:
+        claimed = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        claimed = 0
+    if claimed > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="That file is too big to share (over 2 GB).",
+        )
+
+    if folder_id is not None:
+        return await _stage_file(file, folder_id, relpath)
+
+    original_name = _sanitize_filename(file.filename or "file")
+    ext = Path(original_name).suffix
+    stored_name = f"{uuid.uuid4().hex[:10]}{ext}"
+    dest_path = UPLOADS_DIR / stored_name
+    total = await _stream_upload(file, dest_path)
 
     mime = file.content_type or ""
     if item_type in ("file", "image", "folder"):
@@ -287,6 +334,67 @@ async def upload_file_endpoint(
         except Exception:
             pass
     return payload
+
+
+async def _stage_file(file: UploadFile, folder_id: str, relpath: str | None) -> dict[str, Any]:
+    """Stage one folder member for a later commit (plan §3.5)."""
+    if not _FOLDER_ID_RE.fullmatch(folder_id or ""):
+        raise HTTPException(status_code=400, detail="Bad folder share. Start over.")
+    parts = [
+        p for p in (safe_name(p) for p in (relpath or "").replace("\\", "/").split("/"))
+        if p and p not in (".", "..")
+    ]
+    if not parts:
+        raise HTTPException(status_code=400, detail="Missing file path. Start over.")
+    root = _staging_dir(folder_id)
+    parent = root.joinpath(*parts[:-1]) if len(parts) > 1 else root
+    parent.mkdir(parents=True, exist_ok=True)
+    try:
+        # Segments carry no separators by construction; assert containment anyway.
+        assert parent.resolve().is_relative_to(root.resolve())
+    except (AssertionError, RuntimeError, ValueError):
+        raise HTTPException(status_code=400, detail="Bad file path. Start over.")
+    size = await _stream_upload(file, parent / parts[-1])
+    return {"staged": True, "folder_id": folder_id, "relpath": "/".join(parts), "size": size}
+
+
+@app.post("/api/folder/commit", dependencies=[Depends(require_device)])
+async def commit_folder(body: dict) -> dict[str, Any]:
+    """Assemble staged files into one zip, server-side (plan §3.5)."""
+    import uuid
+    import zipfile
+
+    folder_id = str(body.get("folder_id", ""))
+    if not _FOLDER_ID_RE.fullmatch(folder_id):
+        raise HTTPException(status_code=404, detail="Folder share not found.")
+    root = _staging_dir(folder_id)
+    if not root.is_dir():
+        raise HTTPException(status_code=404, detail="Folder share not found.")
+    try:
+        members = sorted(p for p in root.rglob("*") if p.is_file() and p.suffix != ".part")
+        total = sum(p.stat().st_size for p in members)
+        if not members:
+            raise HTTPException(status_code=400, detail="Nothing to share.")
+        if total > FOLDER_MAX_BYTES:
+            raise HTTPException(status_code=413, detail="That folder is too big to share (over 1 GB).")
+        zip_name = f"{uuid.uuid4().hex[:10]}.zip"
+        dest = UPLOADS_DIR / zip_name
+        tmp = dest.with_suffix(".zip.part")
+        with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            for path in members:
+                zf.write(path, path.relative_to(root).as_posix())
+        shutil.move(str(tmp), str(dest))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+    folder_name = _sanitize_filename(str(body.get("name") or "folder"))
+    logger.info("Committed folder '%s' (%d files, %d bytes) as %s", folder_name, len(members), total, zip_name)
+    return {
+        "url": f"/api/files/{zip_name}",
+        "filename": f"{folder_name}.zip",
+        "filesize": dest.stat().st_size,
+        "type": "folder",
+        "entry_count": len(members),
+    }
 
 
 @app.get("/api/files/{name}", dependencies=[Depends(require_device)])

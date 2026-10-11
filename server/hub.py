@@ -71,6 +71,7 @@ class SyncHub:
         self._auth_failures: dict[WebSocket, int] = {}
         self._hosts: dict[WebSocket, str] = {}
         self._devices: dict[WebSocket, dict[str, Any]] = {}
+        self._last_seen: dict[WebSocket, float] = {}
         self._pinned: set[str] = set()
         self._trust: TrustStore = trust_store or get_store()
         self._store: HistoryStore = store or HistoryStore()
@@ -180,9 +181,11 @@ class SyncHub:
         if self.uploads_dir is None:
             return 0
         try:
-            from server.store import sweep_uploads
+            from server.store import sweep_staging, sweep_uploads
 
-            return sweep_uploads(self.uploads_dir, self._store.referenced_file_ids())
+            removed = sweep_uploads(self.uploads_dir, self._store.referenced_file_ids())
+            removed += sweep_staging(self.uploads_dir)
+            return removed
         except Exception as exc:
             logger.warning("Upload sweep failed: %s", exc)
             return 0
@@ -230,6 +233,7 @@ class SyncHub:
             self._auth[websocket] = False
             self._auth_failures[websocket] = 0
             self._hosts[websocket] = self._client_host(websocket)
+        self._touch(websocket)
 
         try:
             cookies = getattr(websocket, "cookies", None) or {}
@@ -269,7 +273,35 @@ class SyncHub:
             self._auth_failures.pop(websocket, None)
             self._hosts.pop(websocket, None)
             self._devices.pop(websocket, None)
+            self._last_seen.pop(websocket, None)
         logger.info("Client disconnected. Active connections: %d", self.connection_count)
+
+    def _touch(self, websocket: WebSocket) -> None:
+        self._last_seen[websocket] = time.time()
+
+    async def close_silent_sockets(self, max_silent_seconds: float = 90) -> int:
+        """Drop non-loopback sockets with no app-level traffic (plan §3.3).
+
+        Mobile browsers freeze background tabs; the socket looks open but is
+        dead. Loopback (this computer) is exempt — the desktop client sends
+        its own heartbeat and has reconnect logic anyway.
+        """
+        now = time.time()
+        stale: list[WebSocket] = [
+            ws
+            for ws in list(self._connections)
+            if not is_loopback_host(self._hosts.get(ws, ""))
+            and now - self._last_seen.get(ws, now) > max_silent_seconds
+        ]
+        for ws in stale:
+            try:
+                await ws.close(code=1001)
+            except Exception:
+                pass
+            await self.disconnect(ws)
+        if stale:
+            logger.info("Closed %d silent socket(s).", len(stale))
+        return len(stale)
 
     # -- auth handling -----------------------------------------------------
     async def _handle_auth_request(self, sender: WebSocket, message: dict[str, Any]) -> None:
@@ -340,6 +372,8 @@ class SyncHub:
     async def handle_message(self, sender: WebSocket, message: dict[str, Any]) -> None:
         """Process an incoming clipboard event and broadcast to other connected peers."""
         msg_type = message.get("type", "text")
+        if sender is not None:
+            self._touch(sender)
 
         if msg_type == "ping":
             try:
@@ -396,6 +430,12 @@ class SyncHub:
         if isinstance(filename, str) and len(filename) > _MAX_FILENAME_LEN:
             filename = filename[:_MAX_FILENAME_LEN]
 
+        # Echoed to live peers only (never stored): lets the sending phone
+        # swap its optimistic card for the real item (plan §3.6).
+        client_id = message.get("client_id")
+        if not isinstance(client_id, str) or len(client_id) > 64:
+            client_id = None
+
         thumb = message.get("thumb")
         if not isinstance(thumb, str) or len(thumb) > 64 * 1024 or not thumb.startswith("data:image/"):
             thumb = None
@@ -425,6 +465,8 @@ class SyncHub:
             peers = [ws for ws in self._connections if ws != sender and self._auth.get(ws, False)]
 
         payload = item.to_message_dict()
+        if client_id:
+            payload["client_id"] = client_id
         if appended:
             try:
                 # Off the loop: sync SQLite must not delay the broadcast.

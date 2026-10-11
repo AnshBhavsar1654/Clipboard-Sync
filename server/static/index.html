@@ -28,12 +28,12 @@
                 </div>
                 <div class="title-wrap">
                     <h1 id="page-title">ClipBoardSync</h1>
-                    <p class="subtitle">Private Wi-Fi sharing</p>
+                    <p class="subtitle" id="header-subtitle">Private Wi-Fi sharing</p>
                 </div>
             </div>
 
             <div class="header-controls">
-                <div id="connection-status" class="status-indicator">
+                <div id="connection-status" class="status-indicator" role="status" aria-live="polite">
                     <span id="connection-badge" class="badge connecting">
                         <span class="pulse-dot" aria-hidden="true"></span>
                         <span id="status-text">Connecting</span>
@@ -178,6 +178,10 @@
     </main>
 
     <div id="toast-container" class="toast-container" aria-live="polite"></div>
+
+    <div id="lightbox" class="lightbox" hidden>
+        <img id="lightbox-img" class="lightbox-img" alt="Shared photo enlarged">
+    </div>
 
     <script src="app.js"></script>
 </body>

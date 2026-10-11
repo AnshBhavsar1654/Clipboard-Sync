@@ -17,7 +17,7 @@ from server.main import hub
 
 
 @pytest.fixture()
-def locked_hub(tmp_path):
+def locked_hub(tmp_path, monkeypatch):
     """Isolate the global hub with a PIN-required trust store (plan §0.1)."""
     store = TrustStore(tmp_path / "state.json")  # require_pin defaults True
     old_trust = hub._trust
@@ -26,6 +26,8 @@ def locked_hub(tmp_path):
     hub._history.clear()
     hub._auth.clear()
     hub._auth_failures.clear()
+    monkeypatch.setattr("server.main.UPLOADS_DIR", tmp_path / "shared")
+    (tmp_path / "shared").mkdir(parents=True, exist_ok=True)
     yield hub
     hub._connections.clear()
     hub._history.clear()

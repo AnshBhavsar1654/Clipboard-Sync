@@ -56,6 +56,10 @@ document.addEventListener("DOMContentLoaded", () => {
     let reconnectDelay = 1000;
     const maxReconnectDelay = 15000;
     let isConnecting = false;
+    let reconnectTimer = null;
+    let heartbeatTimer = null;
+    let everConnected = false;
+    let hadOutage = false;
 
     // Feed state: canonical items (newest first) + currently visible subset
     let feedItems = [];
@@ -74,9 +78,17 @@ document.addEventListener("DOMContentLoaded", () => {
                 isConnecting = false;
                 reconnectDelay = 1000;
                 updateConnectionStatus("connecting");
-                showToast("Connected — ready to share", "success");
+                // Toast only on first connect or after a real outage (plan §3.3).
+                if (!everConnected) {
+                    everConnected = true;
+                    showToast("Connected — ready to share", "success");
+                } else if (hadOutage) {
+                    hadOutage = false;
+                    showToast("Back online — ready to share", "success");
+                }
                 ws.send(JSON.stringify({ type: "auth_request", device_id: deviceId }));
                 sendHello();
+                startHeartbeat();
             };
 
             function sendHello() {
@@ -98,6 +110,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
             ws.onclose = () => {
                 isConnecting = false;
+                stopHeartbeat();
+                if (everConnected) hadOutage = true;
                 updateConnectionStatus("disconnected");
                 scheduleReconnect();
             };
@@ -117,11 +131,47 @@ document.addEventListener("DOMContentLoaded", () => {
 
     function scheduleReconnect() {
         updateConnectionStatus("disconnected");
-        setTimeout(() => {
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
             connect();
         }, reconnectDelay);
         reconnectDelay = Math.min(reconnectDelay * 1.5, maxReconnectDelay);
     }
+
+    // App-level heartbeat so half-open sockets are detected (plan §3.3).
+    function startHeartbeat() {
+        stopHeartbeat();
+        heartbeatTimer = setInterval(() => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                try { ws.send('{"type":"ping"}'); } catch (e) { /* reconnect loop handles it */ }
+            }
+        }, 25000);
+    }
+
+    function stopHeartbeat() {
+        if (heartbeatTimer) {
+            clearInterval(heartbeatTimer);
+            heartbeatTimer = null;
+        }
+    }
+
+    // Mobile browsers freeze background tabs (plan §3.3): reconnect fast
+    // when the page is visible again or the network returns.
+    document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible" && (!ws || ws.readyState !== WebSocket.OPEN)) {
+            reconnectDelay = 500;
+            if (reconnectTimer) clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+            connect();
+        }
+    });
+    window.addEventListener("online", () => {
+        reconnectDelay = 500;
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+        connect();
+    });
 
     function updateConnectionStatus(state) {
         connectionBadge.className = `badge ${state}`;
@@ -136,6 +186,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // Message Processing
     function handleIncomingMessage(msg) {
+        if (msg.type === "pong") return; // heartbeat reply
         if (msg.type === "auth_required") {
             showAuthScreen();
             updateConnectionStatus("connecting");
@@ -165,6 +216,15 @@ document.addEventListener("DOMContentLoaded", () => {
             itemCounter.textContent = `${feedItems.length} ${feedItems.length === 1 ? "item" : "items"}`;
             applyFilter();
         } else if ((msg.type === "text" || msg.type === "image" || msg.type === "file" || msg.type === "folder") && (msg.content || msg.file_url)) {
+            // Reconcile optimistic cards by client_id instead of duplicating (plan §3.6).
+            if (msg.client_id) {
+                const idx = feedItems.findIndex(i => i && i.client_id === msg.client_id);
+                if (idx !== -1) {
+                    feedItems[idx] = msg;
+                    applyFilter();
+                    return;
+                }
+            }
             feedItems.unshift(msg);
             itemCounter.textContent = `${feedItems.length} ${feedItems.length === 1 ? "item" : "items"}`;
             applyFilter();
@@ -218,80 +278,92 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     }
 
-    // Minimal stored-zip writer (offline-safe, no CDN). Good enough for
-    // folder sharing on a LAN with no internet access.
-    function crc32(bytes) {
-        let table = crc32._t;
-        if (!table) {
-            table = new Uint32Array(256);
-            for (let n = 0; n < 256; n++) {
-                let c = n;
-                for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
-                table[n] = c >>> 0;
+    function newFolderId() {
+        try {
+            const bytes = new Uint8Array(8);
+            crypto.getRandomValues(bytes);
+            return Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
+        } catch (e) {
+            let id = "";
+            for (let i = 0; i < 16; i++) id += Math.floor(Math.random() * 16).toString(16);
+            return id;
+        }
+    }
+
+    // Folder shares without loading everything into RAM (plan §3.5): files
+    // stream one by one (Blobs are zero-copy) and the SERVER assembles the
+    // zip from disk once /api/folder/commit arrives.
+    async function uploadStagedFiles(entries, displayName) {
+        const files = (entries || []).filter(e => e && e.file && e.file.size >= 0);
+        if (!files.length) {
+            showToast("Nothing to share", "info");
+            return;
+        }
+        const totalBytes = files.reduce((n, f) => n + (f.file.size || 0), 0);
+        if (totalBytes > 1024 * 1024 * 1024) {
+            showToast("That folder is too big to share from a phone (over 1 GB)", "info");
+            return;
+        }
+        const folderId = newFolderId();
+        let sent = 0;
+        showToast(`Sharing ${files.length} files…`, "info");
+        try {
+            for (const e of files) {
+                const form = new FormData();
+                form.append("file", e.file, (e.relpath || "file").split("/").pop());
+                form.append("folder_id", folderId);
+                form.append("relpath", e.relpath);
+                await postFormWithProgress("/api/upload", form, e.relpath, e.file.size || 0);
+                sent += e.file.size || 0;
+                showUploadProgress(displayName, sent, totalBytes);
             }
-            crc32._t = table;
+            hideUploadProgress();
+            const resp = await fetch("/api/folder/commit", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ folder_id: folderId, name: displayName })
+            });
+            if (resp.status === 413) {
+                showToast("That folder is too big to share (over 1 GB)", "info");
+                return;
+            }
+            if (resp.status === 401 || resp.status === 403) {
+                showAuthScreen();
+                showToast("Pair this phone first — enter the code.", "info");
+                return;
+            }
+            if (!resp.ok) throw new Error(`Commit failed (${resp.status})`);
+            const data = await resp.json();
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                showToast("Shared on this phone, but sharing is offline.", "info");
+                return;
+            }
+            const payload = {
+                device_id: deviceId,
+                timestamp: new Date().toISOString(),
+                type: "folder",
+                content: `Folder: ${data.filename}`,
+                filename: data.filename,
+                filesize: data.filesize,
+                file_url: data.url,
+                entry_count: data.entry_count,
+                client_id: newClientId()
+            };
+            ws.send(JSON.stringify(payload));
+            feedItems.unshift(payload);
+            itemCounter.textContent = `${feedItems.length} ${feedItems.length === 1 ? "item" : "items"}`;
+            applyFilter();
+            showToast(`Shared ${data.filename} with your computer`, "success");
+        } catch (err) {
+            hideUploadProgress();
+            console.error("Folder share failed:", err);
+            if (err && (err.status === 401 || err.status === 403)) {
+                showAuthScreen();
+                showToast("Pair this phone first — enter the code.", "info");
+                return;
+            }
+            showToast("Could not share that folder. Try again.", "info");
         }
-        let crc = 0xFFFFFFFF;
-        for (let i = 0; i < bytes.length; i++) crc = table[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8);
-        return (crc ^ 0xFFFFFFFF) >>> 0;
-    }
-
-    function zipStore(fileList) {
-        // fileList: [{name, data: Uint8Array}]. Returns Blob (.zip, stored).
-        const enc = new TextEncoder();
-        const chunks = [];
-        const central = [];
-        let offset = 0;
-        for (const f of fileList) {
-            const nameBytes = enc.encode(f.name);
-            const crc = crc32(f.data);
-            const local = new DataView(new ArrayBuffer(30));
-            local.setUint32(0, 0x04034b50, true);
-            local.setUint16(4, 20, true);
-            local.setUint16(6, 0x0800, true); // UTF-8 names
-            local.setUint16(8, 0, true); // stored
-            local.setUint16(10, 0, true); local.setUint16(12, 0, true);
-            local.setUint32(14, crc, true);
-            local.setUint32(18, f.data.length, true);
-            local.setUint32(22, f.data.length, true);
-            local.setUint16(26, nameBytes.length, true);
-            local.setUint16(28, 0, true);
-            chunks.push(local.buffer, nameBytes.buffer, f.data.buffer);
-            central.push({ nameBytes, crc, size: f.data.length, offset });
-            offset += 30 + nameBytes.length + f.data.length;
-        }
-        const cdStart = offset;
-        let cdSize = 0;
-        for (const c of central) {
-            const h = new DataView(new ArrayBuffer(46));
-            h.setUint32(0, 0x02014b50, true);
-            h.setUint16(4, 20, true); h.setUint16(6, 20, true);
-            h.setUint16(8, 0x0800, true); h.setUint16(10, 0, true);
-            h.setUint16(12, 0, true); h.setUint16(14, 0, true);
-            h.setUint32(16, c.crc, true);
-            h.setUint32(20, c.size, true); h.setUint32(24, c.size, true);
-            h.setUint16(28, c.nameBytes.length, true);
-            h.setUint16(30, 0, true); h.setUint16(32, 0, true);
-            h.setUint16(34, 0, true); h.setUint16(36, 0, true);
-            h.setUint32(38, 0, true);
-            h.setUint32(42, c.offset, true);
-            chunks.push(h.buffer, c.nameBytes.buffer);
-            cdSize += 46 + c.nameBytes.length;
-        }
-        const end = new DataView(new ArrayBuffer(22));
-        end.setUint32(0, 0x06054b50, true);
-        end.setUint16(8, central.length, true);
-        end.setUint16(10, central.length, true);
-        end.setUint32(12, cdSize, true);
-        end.setUint32(16, cdStart, true);
-        end.setUint16(20, 0, true);
-        chunks.push(end.buffer);
-        return new Blob(chunks, { type: "application/zip" });
-    }
-
-    async function readAsBytes(file) {
-        const buf = await file.arrayBuffer();
-        return new Uint8Array(buf);
     }
 
     async function uploadFolderAsZip(fileList, folderName) {
@@ -300,28 +372,21 @@ document.addEventListener("DOMContentLoaded", () => {
             showToast("That folder is empty", "info");
             return;
         }
-        const totalBytes = files.reduce((n, f) => n + (f.size || 0), 0);
-        if (totalBytes > 1024 * 1024 * 1024) {
-            showToast("That folder is too big to share from a phone (over 1 GB)", "info");
-            return;
-        }
-        showToast(`Zipping ${files.length} files…`, "info");
         const SKIP = ["__MACOSX", ".DS_Store"];
         const entries = [];
         let skipped = 0;
         for (const f of files) {
             const rel = (f.webkitRelativePath || f.name || "").replace(/^\/+/, "");
             if (!rel || SKIP.some(s => rel.includes(s))) { skipped++; continue; }
-            entries.push({ name: rel, data: await readAsBytes(f) });
+            entries.push({ relpath: rel, file: f });
         }
         if (!entries.length) {
             showToast("Nothing to share after skipping system files", "info");
             return;
         }
-        const zipBlob = zipStore(entries);
-        const name = `${(folderName || (entries[0].name.split("/")[0]) || "folder")}.zip`;
-        const zipFile = new File([zipBlob], name, { type: "application/zip" });
-        await uploadAndTransmitFile(zipFile, { itemType: "folder", entryCount: entries.length, skippedCount: skipped });
+        if (skipped) showToast(`${skipped} system files skipped`, "info");
+        const name = folderName || (entries[0].relpath.split("/")[0]) || "folder";
+        await uploadStagedFiles(entries, name);
     }
 
     async function uploadAndTransmitFile(file, opts = {}) {
@@ -359,7 +424,8 @@ document.addEventListener("DOMContentLoaded", () => {
                 content: itemType === "image" ? `Image: ${data.filename}` : `${itemType === "folder" ? "Folder" : "File"}: ${data.filename}`,
                 filename: data.filename,
                 filesize: data.filesize,
-                file_url: data.url
+                file_url: data.url,
+                client_id: newClientId()
             };
             if (data.thumb) payload.thumb = data.thumb;
             if (data.entry_count != null) payload.entry_count = data.entry_count;
@@ -385,6 +451,10 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     }
 
+    function newClientId() {
+        return "c-" + Date.now().toString(36) + Math.random().toString(36).substring(2, 8);
+    }
+
     function transmitClipboard(text) {
         if (!text || !text.trim()) return;
 
@@ -397,7 +467,8 @@ document.addEventListener("DOMContentLoaded", () => {
             device_id: deviceId,
             timestamp: new Date().toISOString(),
             type: "text",
-            content: text
+            content: text,
+            client_id: newClientId()
         };
 
         ws.send(JSON.stringify(payload));
@@ -441,8 +512,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
     function buildClipCard(item) {
         const card = document.createElement("div");
-        card.className = "clip-card";
-        card.dataset.id = item.id || Date.now();
+        card.className = "clip-card" + (item.pinned ? " pinned" : "");
+        card.dataset.id = item.id || "";
+        if (item.client_id) card.dataset.clientId = item.client_id;
 
         const isLaptop = item.device_id && (item.device_id.toLowerCase().includes("win") || item.device_id.toLowerCase().includes("desktop") || item.device_id.toLowerCase().includes("laptop") || item.device_id.length > 25);
         const deviceTagClass = isLaptop ? "laptop" : "phone";
@@ -465,7 +537,7 @@ document.addEventListener("DOMContentLoaded", () => {
             } else {
                 bodyHtml = `
                     <div class="card-media-wrap">
-                        <img src="${imgSrc}" class="card-image-preview" alt="Shared photo" loading="lazy" />
+                        <img src="${imgSrc}" data-full="${fullSrc || imgSrc}" class="card-image-preview" alt="Shared photo" loading="lazy" />
                     </div>
                 `;
                 actionBtnHtml = `
@@ -528,6 +600,12 @@ document.addEventListener("DOMContentLoaded", () => {
             `;
         }
 
+        const itemBtns = `
+            ${item.file_url && safeFileUrl(item.file_url) ? '<button class="mini-btn" data-act="link">Copy link</button>' : ""}
+            <button class="mini-btn" data-act="pin">${item.pinned ? "Unpin" : "Pin"}</button>
+            <button class="mini-btn danger" data-act="delete">Delete</button>
+        `;
+
         card.innerHTML = `
             <div class="card-header">
                 <span class="device-tag ${deviceTagClass}">
@@ -539,6 +617,7 @@ document.addEventListener("DOMContentLoaded", () => {
             ${bodyHtml}
             <div class="card-actions">
                 ${actionBtnHtml}
+                ${itemBtns}
             </div>
         `;
 
@@ -548,8 +627,94 @@ document.addEventListener("DOMContentLoaded", () => {
                 copyBtn.addEventListener("click", () => handleCopyClick(copyBtn, item.content));
             }
         }
+        card.querySelectorAll("[data-act]").forEach(btn => {
+            btn.addEventListener("click", () => handleItemAction(btn.dataset.act, item));
+        });
+        const preview = card.querySelector(".card-image-preview");
+        if (preview && preview.dataset.full) {
+            preview.addEventListener("click", () => openLightbox(preview.dataset.full));
+        }
 
         return card;
+    }
+
+    function removeLocalItem(item) {
+        feedItems = feedItems.filter(i => i !== item);
+        itemCounter.textContent = `${feedItems.length} ${feedItems.length === 1 ? "item" : "items"}`;
+        applyFilter();
+    }
+
+    async function copyTextRaw(text) {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(text);
+            return;
+        }
+        const temp = document.createElement("textarea");
+        temp.value = text;
+        document.body.appendChild(temp);
+        temp.select();
+        document.execCommand("copy");
+        document.body.removeChild(temp);
+    }
+
+    // Per-item actions: delete/pin everywhere, copy link (plan §3.6).
+    async function handleItemAction(act, item) {
+        try {
+            if (act === "link") {
+                const rel = safeFileUrl(item.file_url || "");
+                if (!rel) return;
+                await copyTextRaw(new URL(rel, window.location.origin).href);
+                showToast("Link copied", "success");
+                return;
+            }
+            if (!item.id) {
+                // Optimistic card: local-only until the server echoes it back.
+                if (act === "delete") removeLocalItem(item);
+                else { item.pinned = !item.pinned; applyFilter(); }
+                return;
+            }
+            const id = encodeURIComponent(item.id);
+            if (act === "delete") {
+                const resp = await fetch(`/api/history/${id}`, { method: "DELETE" });
+                if (resp.ok) {
+                    removeLocalItem(item);
+                    showToast("Deleted everywhere", "success");
+                } else {
+                    showToast("Could not delete. Try again.", "info");
+                }
+            } else if (act === "pin") {
+                const resp = await fetch(`/api/history/${id}/pin`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ pinned: !item.pinned })
+                });
+                if (resp.ok) {
+                    item.pinned = !item.pinned;
+                    applyFilter();
+                } else {
+                    showToast("Could not pin. Try again.", "info");
+                }
+            }
+        } catch (err) {
+            console.warn("Item action failed:", err);
+            showToast("Sharing is offline. Try again in a moment.", "info");
+        }
+    }
+
+    function openLightbox(src) {
+        const box = document.getElementById("lightbox");
+        const img = document.getElementById("lightbox-img");
+        if (!box || !img) return;
+        img.src = src;
+        box.hidden = false;
+    }
+
+    function closeLightbox() {
+        const box = document.getElementById("lightbox");
+        const img = document.getElementById("lightbox-img");
+        if (!box || !img) return;
+        box.hidden = true;
+        img.removeAttribute("src");
     }
 
     async function handleCopyClick(btn, text) {
@@ -752,20 +917,10 @@ document.addEventListener("DOMContentLoaded", () => {
             uploadAndTransmitFile(picked[0]);
             return;
         }
-        // Multiple files picked (iOS fallback): zip into one folder share.
-        const total = picked.reduce((n, f) => n + (f.size || 0), 0);
-        if (total > 1024 * 1024 * 1024) {
-            showToast("Those files are too big to share from a phone (over 1 GB)", "info");
-            return;
-        }
-        showToast(`Zipping ${picked.length} files…`, "info");
-        const entries = [];
-        for (const f of picked) {
-            entries.push({ name: f.name || "file", data: await readAsBytes(f) });
-        }
-        const zipBlob = zipStore(entries);
-        const zipFile = new File([zipBlob], "shared_files.zip", { type: "application/zip" });
-        uploadAndTransmitFile(zipFile, { itemType: "folder", entryCount: entries.length, skippedCount: 0 });
+        // Multiple files picked (iOS fallback): stage them all, the server
+        // assembles one folder share without loading them into RAM.
+        const entries = picked.map(f => ({ relpath: f.name || "file", file: f }));
+        uploadStagedFiles(entries, "shared_files");
     });
 
     if (folderInput) {
@@ -959,6 +1114,46 @@ document.addEventListener("DOMContentLoaded", () => {
             return "Just now";
         }
     }
+
+    // Browsers outside secure contexts (plain http://LAN) cannot use the
+    // async clipboard API: don't promise one-tap Paste (plan §3.2).
+    if (!window.isSecureContext) {
+        pasteAndSendBtn.style.display = "none";
+        sendInput.placeholder = "Tap here, then use Paste…";
+    }
+
+    // Lightbox: tap a photo to enlarge, tap anywhere or Esc to close.
+    const lightbox = document.getElementById("lightbox");
+    if (lightbox) {
+        lightbox.addEventListener("click", closeLightbox);
+    }
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") {
+            const box = document.getElementById("lightbox");
+            if (box && !box.hidden) closeLightbox();
+        }
+    });
+
+    // Show the connected computer's name in the header (plan §3.6).
+    async function refreshHeaderName(connected) {
+        const sub = document.getElementById("header-subtitle");
+        if (!sub) return;
+        if (!connected) {
+            sub.textContent = "Private Wi-Fi sharing";
+            return;
+        }
+        try {
+            const resp = await fetch("/api/info");
+            if (resp.ok) {
+                const info = await resp.json();
+                if (info.computer_name) sub.textContent = `Connected to ${info.computer_name}`;
+            }
+        } catch (e) { /* keep default subtitle */ }
+    }
+    const _hideAuthScreen = hideAuthScreen;
+    hideAuthScreen = function () { _hideAuthScreen(); refreshHeaderName(true); };
+    const _showAuthScreen = showAuthScreen;
+    showAuthScreen = function () { _showAuthScreen(); refreshHeaderName(false); };
 
     // Initialize connection and empty state
     updateEmptyState("", 0);

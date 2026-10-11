@@ -8,8 +8,13 @@ from server.auth import TrustStore
 from server.main import STATIC_DIR, UPLOADS_DIR, hub
 
 
+def _patch_uploads_dir(tmp_path, monkeypatch):
+    (tmp_path / "shared").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("server.main.UPLOADS_DIR", tmp_path / "shared")
+
+
 @pytest.fixture()
-def locked_hub(tmp_path):
+def locked_hub(tmp_path, monkeypatch):
     store = TrustStore(tmp_path / "state.json")  # require_pin defaults True
     old_trust = hub._trust
     hub._trust = store
@@ -18,6 +23,7 @@ def locked_hub(tmp_path):
     hub._auth.clear()
     hub._auth_failures.clear()
     hub._hosts.clear()
+    _patch_uploads_dir(tmp_path, monkeypatch)
     yield hub
     hub._connections.clear()
     hub._history.clear()
@@ -28,7 +34,7 @@ def locked_hub(tmp_path):
 
 
 @pytest.fixture()
-def open_hub(tmp_path):
+def open_hub(tmp_path, monkeypatch):
     store = TrustStore(tmp_path / "state.json")
     store.require_pin = False
     old_trust = hub._trust
@@ -38,6 +44,7 @@ def open_hub(tmp_path):
     hub._auth.clear()
     hub._auth_failures.clear()
     hub._hosts.clear()
+    _patch_uploads_dir(tmp_path, monkeypatch)
     yield hub
     hub._connections.clear()
     hub._history.clear()
