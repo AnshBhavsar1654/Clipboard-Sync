@@ -92,6 +92,8 @@ def build(mode: str, target: str) -> int:
         "--hidden-import=uvicorn.lifespan.on",
         "--hidden-import=websockets",
         "--hidden-import=websockets.asyncio.client",
+        "--hidden-import=webview.platforms.edgechromium",
+        "--hidden-import=pystray._win32",
         "--hidden-import=win32clipboard",
         "--hidden-import=win32con",
         "--hidden-import=win32timezone",

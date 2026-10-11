@@ -48,9 +48,14 @@
 ```bash
 uv sync                  # or: pip install -r requirements.txt
 
-python run_gui.py        # desktop GUI dashboard
+python run_desktop.py    # desktop window (search, connect dialog, settings, tray)
+python run_gui.py        # legacy desktop window (kept until the new UI passes acceptance)
 python run_app.py        # headless terminal launcher (see --help for --port/--headless)
 ```
+
+The desktop window adds: `Ctrl+K` search with keyboard navigation (`↑ ↓ Enter`, `P` pin, `Del` delete),
+drag-and-drop or `Ctrl+V` sharing, a system tray icon (quit from there — closing the
+window keeps sharing), and a global `Ctrl+Shift+V` quick-paste overlay.
 
 ### Checks
 
@@ -79,15 +84,17 @@ python build_exe.py --target headless     # console build for the smoke test
 |-------|------------|
 | Sync engine | FastAPI + Uvicorn, WebSocket (`/ws`), REST history (`/api/history`), upload (`/api/upload`), pairing (`/api/pair`) |
 | Windows client | Native Win32 clipboard hooks (pywin32) wired into asyncio |
-| Desktop GUI | CustomTkinter, QR via `qrcode` + Pillow |
+| Desktop GUI | WebView2 window + tray + hotkey (`gui/`), loopback admin API; legacy CustomTkinter in `run_gui.py` |
 | Mobile frontend | Vanilla HTML/CSS/JS (no CDN, no frameworks), native WebSocket + Clipboard APIs |
 
 ### Project structure
 
 ```
 ClipBoardSync/
-├── gui/                  # Desktop GUI (CustomTkinter)
+├── gui/                  # Desktop shell: WebView2 window, tray, hotkey, engine
 ├── server/               # FastAPI app, sync hub, pairing, storage
+│   ├── admin.py          # loopback-only desktop API (token-gated)
+│   └── static/desktop/   # desktop window UI (HTML/CSS/JS)
 │   ├── auth.py           # PIN + device tokens + brute-force throttle
 │   ├── hub.py            # WebSocket fan-out, history, device list
 │   ├── store.py          # SQLite history, pins, upload janitor
@@ -99,7 +106,8 @@ ClipBoardSync/
 │   ├── clipboard_backend.py  # Win32/Fake backends, content hash
 │   └── config.py         # device id + receive prefs (prefs.json)
 ├── assets/               # Application icon
-├── run_gui.py            # GUI entry point
+├── run_desktop.py        # New desktop shell entry point
+├── run_gui.py            # Legacy GUI entry point
 ├── run_app.py            # Headless entry point (--port/--headless)
 ├── build_exe.py          # PyInstaller build script
 ├── installer.iss         # Inno Setup installer script

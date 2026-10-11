@@ -21,6 +21,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from server import __version__
+from server.admin import router as admin_router
 from server.auth import is_loopback_host
 from server.filenames import safe_name
 from server.hub import SyncHub
@@ -106,6 +107,8 @@ app = FastAPI(
 # PC's clips via loopback; unsafe cross-site writes are rejected below.
 
 hub = SyncHub(max_history=25)
+
+app.include_router(admin_router)
 
 
 @app.middleware("http")

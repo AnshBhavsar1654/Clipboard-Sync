@@ -126,6 +126,24 @@ class TrustStore:
             self._devices.pop(_token_hash(token), None)
         self._save()
 
+    def phone_tokens(self) -> list[dict[str, Any]]:
+        """Paired phones (token credentials) for the device list."""
+        with self._lock:
+            return [
+                {"id": h[:12], "name": v.get("name", "Phone"), "last_seen": v.get("last_seen", 0)}
+                for h, v in self._devices.items()
+            ]
+
+    def revoke_token_prefix(self, prefix: str) -> bool:
+        """Revoke a phone by the id shown in the device list."""
+        with self._lock:
+            hits = [h for h in self._devices if h.startswith(prefix or "xx")]
+            for h in hits:
+                del self._devices[h]
+        if hits:
+            self._save()
+        return bool(hits)
+
     # -- pairing PIN -------------------------------------------------------
     @staticmethod
     def _generate() -> str:

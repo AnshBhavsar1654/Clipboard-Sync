@@ -25,7 +25,7 @@ jobs:
         # Lint the new/extracted modules. Extend to `ruff check .` once
         # remaining phases clear pre-existing violations in server/hub.py,
         # server/main.py, server/discovery.py, gui/ and legacy client code.
-        run: ruff check client/clipboard_backend.py client/clipboard.py client/config.py tests/conftest.py tests/test_regressions.py tests/test_auth_matrix.py tests/test_m1_fixes.py tests/test_m2_transport.py tests/test_m2_platform.py tests/test_p3_phone.py tests/smoke_exe.py server/auth.py server/filenames.py server/media.py server/net.py server/store.py
+        run: ruff check client/clipboard_backend.py client/clipboard.py client/config.py tests/conftest.py tests/test_regressions.py tests/test_auth_matrix.py tests/test_m1_fixes.py tests/test_m2_transport.py tests/test_m2_platform.py tests/test_p3_phone.py tests/test_p4_desktop.py tests/smoke_exe.py server/auth.py server/filenames.py server/media.py server/net.py server/store.py server/admin.py gui/engine.py gui/shell.py gui/tray.py gui/hotkey.py run_desktop.py
 
       - name: Test (pytest)
         run: pytest -q --ignore=tests/smoke_exe.py --ignore=tests/test_phone_web.py
