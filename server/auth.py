@@ -47,7 +47,10 @@ class TrustStore:
         self._fails: dict[str, list[float]] = defaultdict(list)
         self._require_pin = True
         self._pin = self._generate()
+        fresh = not self._path.exists()
         self._load()
+        if fresh:
+            self._save()  # persist the generated PIN so tools can read it
 
     # -- persistence -------------------------------------------------------
     def _load(self) -> None:

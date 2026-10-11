@@ -25,7 +25,30 @@ jobs:
         # Lint the new/extracted modules. Extend to `ruff check .` once
         # remaining phases clear pre-existing violations in server/hub.py,
         # server/main.py, server/discovery.py, gui/ and legacy client code.
-        run: ruff check client/clipboard_backend.py client/clipboard.py client/config.py tests/conftest.py tests/test_regressions.py tests/test_m1_fixes.py tests/test_m2_transport.py tests/test_m2_platform.py tests/test_p3_phone.py server/auth.py server/filenames.py server/media.py server/net.py server/store.py server/net.py server/store.py
+        run: ruff check client/clipboard_backend.py client/clipboard.py client/config.py tests/conftest.py tests/test_regressions.py tests/test_auth_matrix.py tests/test_m1_fixes.py tests/test_m2_transport.py tests/test_m2_platform.py tests/test_p3_phone.py tests/smoke_exe.py server/auth.py server/filenames.py server/media.py server/net.py server/store.py
 
       - name: Test (pytest)
-        run: pytest -q
+        run: pytest -q --ignore=tests/smoke_exe.py --ignore=tests/test_phone_web.py
+
+  smoke:
+    # Plan §5.2: a missing hidden import must fail here, not in a release.
+    # Builds the headless exe (~5 min) and drives it over real HTTP+WS.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build headless exe
+        run: python build_exe.py --target headless
+
+      - name: Smoke the built exe
+        run: pytest tests/smoke_exe.py -q --exe=dist/ClipBoardSyncHeadless/ClipBoardSyncHeadless.exe

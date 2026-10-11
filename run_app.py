@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
-from typing import Any
 
 import qrcode
 import uvicorn
+
 from client.config import Config
 from client.main import ClipBoardSyncApp, _install_signal_handlers
 from server.auth import get_store
@@ -113,8 +113,16 @@ async def async_run_all(port: int = 8000) -> None:
         client_app.request_shutdown()
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     """CLI launcher entrypoint."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run ClipBoardSync (server + desktop client).")
+    parser.add_argument("--port", type=int, default=8000, help="port to share on (default: 8000)")
+    parser.add_argument("--headless", action="store_true",
+                        help="run without any window (used by the built exe smoke test)")
+    args = parser.parse_args(argv)
+
     if sys.platform != "win32":
         print("ClipBoardSync works best on Windows for clipboard sharing.", file=sys.stderr)
 
@@ -125,7 +133,7 @@ def main() -> None:
         sys.exit(0)
 
     try:
-        asyncio.run(async_run_all())
+        asyncio.run(async_run_all(port=args.port))
     except KeyboardInterrupt:
         print("\nStopping sharing. Goodbye!")
 

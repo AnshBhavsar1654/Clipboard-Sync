@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.requests import Request
 from starlette.responses import Response
 
+from server import __version__
 from server.auth import is_loopback_host
 from server.filenames import safe_name
 from server.hub import SyncHub
@@ -96,7 +97,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="ClipBoardSync Backend",
     description="Cross-device local Wi-Fi clipboard synchronization engine.",
-    version="1.0.0",
+    version=__version__,
     lifespan=lifespan,
 )
 
@@ -163,6 +164,12 @@ async def get_devices() -> dict[str, Any]:
     """Connected devices with names (plan §2.10)."""
     devices = hub.devices()
     return {"devices": devices, "connection_count": len(devices)}
+
+
+@app.get("/api/health")
+async def get_health() -> dict[str, Any]:
+    """Unauthenticated liveness probe (used by the exe smoke test)."""
+    return {"ok": True, "version": app.version}
 
 
 @app.get("/api/info")

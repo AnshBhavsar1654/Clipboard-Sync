@@ -1,12 +1,22 @@
-"""Automated build script to package ClipBoardSync into a standalone Windows Executable (.exe)."""
+"""Package ClipBoardSync into a standalone Windows executable (plan §5.1).
+
+Default: --onedir GUI build wrapped by installer.iss (fast start, fewer AV
+false positives). Variants:
+  python build_exe.py --mode onefile --target gui       # portable single exe
+  python build_exe.py --target headless                 # console server+client
+                                                        # (used by the smoke test)
+The generated .spec is kept for review; dist/, build/ and *.spec are
+git-ignored — releases ship via GitHub Release assets, not git.
+"""
 
 from __future__ import annotations
 
+import argparse
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 
 def _ensure_icon(root_dir: Path) -> Path | None:
@@ -33,8 +43,7 @@ def _ensure_icon(root_dir: Path) -> Path | None:
     return ico_file if ico_file.exists() else None
 
 
-def main() -> None:
-    """Run PyInstaller to compile ClipBoardSync Desktop Application."""
+def build(mode: str, target: str) -> int:
     print("Building ClipBoardSync...")
     print("Creating the standalone app file you can double-click to start sharing.")
     print("-" * 64)
@@ -42,7 +51,7 @@ def main() -> None:
     root_dir = Path(__file__).parent.resolve()
     os.chdir(root_dir)
 
-    # Terminate running ClipBoardSync.exe instances to release file locks on Windows
+    # Terminate running instances to release file locks on Windows
     if sys.platform == "win32":
         subprocess.run(["taskkill", "/F", "/IM", "ClipBoardSync.exe"], capture_output=True)
 
@@ -53,10 +62,6 @@ def main() -> None:
             print(f"Cleaning: {path}")
             shutil.rmtree(path, ignore_errors=True)
 
-    spec_file = root_dir / "ClipBoardSync.spec"
-    if spec_file.exists():
-        spec_file.unlink()
-
     # Determine OS path separator for PyInstaller --add-data (semicolon on Windows, colon on Linux/macOS)
     sep = ";" if sys.platform == "win32" else ":"
 
@@ -66,15 +71,16 @@ def main() -> None:
     icon_arg = f"--icon={icon_file}" if icon_file else "--icon="
     asset_arg = f"--add-data=assets{sep}assets"
 
+    entry = "run_gui.py" if target == "gui" else "run_app.py"
+    name = "ClipBoardSync" if target == "gui" else "ClipBoardSyncHeadless"
+
     # Build command arguments
     pyinstaller_args = [
         sys.executable,
         "-m",
         "PyInstaller",
-        "--name", "ClipBoardSync",
-        "--onefile",
-        "--windowed",
-        "--noconsole",
+        "--name", name,
+        "--onedir" if mode == "onedir" else "--onefile",
         f"--add-data=server/static{sep}server/static",
         asset_arg,
         icon_arg,
@@ -85,25 +91,50 @@ def main() -> None:
         "--hidden-import=uvicorn.protocols.websockets.auto",
         "--hidden-import=uvicorn.lifespan.on",
         "--hidden-import=websockets",
+        "--hidden-import=websockets.asyncio.client",
         "--hidden-import=win32clipboard",
         "--hidden-import=win32con",
+        "--hidden-import=win32timezone",
+        "--hidden-import=multipart",
         "--clean",
-        "run_gui.py"
+        "--noconfirm",
+        entry,
     ]
+    if target == "gui":
+        pyinstaller_args[4:4] = ["--windowed", "--noconsole"]
 
     print(f"Running: {' '.join(pyinstaller_args)}\n")
 
     result = subprocess.run(pyinstaller_args)
     if result.returncode == 0:
-        exe_path = root_dir / "dist" / ("ClipBoardSync.exe" if sys.platform == "win32" else "ClipBoardSync")
+        from server import __version__
+
+        if mode == "onedir":
+            exe_path = root_dir / "dist" / name / (f"{name}.exe" if sys.platform == "win32" else name)
+        else:
+            exe_path = root_dir / "dist" / (f"{name}.exe" if sys.platform == "win32" else name)
         print("")
-        print("Build complete.")
+        print(f"Build complete (version {__version__}).")
         print(f"Your app is ready: {exe_path}")
-        print("Double-click it to start sharing. No Python setup needed.")
+        if target == "gui" and mode == "onedir":
+            print("Next: build the installer with Inno Setup using installer.iss.")
+        else:
+            print("Double-click it to start sharing. No Python setup needed.")
     else:
         print("")
-        print("Build did not complete. Check that Python, PyInstaller, and project dependencies are installed, then try again.")
-        sys.exit(result.returncode)
+        print("Build did not complete. Check Python, PyInstaller, and dependencies,")
+        print("then try again.")
+    return result.returncode
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Build the ClipBoardSync executable.")
+    parser.add_argument("--mode", choices=("onedir", "onefile"), default="onedir",
+                        help="onedir: fast start for the installer (default); onefile: portable exe")
+    parser.add_argument("--target", choices=("gui", "headless"), default="gui",
+                        help="gui: desktop window; headless: console server+client for smoke tests")
+    args = parser.parse_args()
+    sys.exit(build(args.mode, args.target))
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 [project]
 name = "clipboardsync"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.2.0"
+description = "Share clipboard text, photos, and files between a Windows PC and phones over local Wi-Fi. No cloud, no accounts."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [

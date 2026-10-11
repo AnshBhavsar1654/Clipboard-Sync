@@ -10,6 +10,13 @@ from server.main import app, hub
 from server.store import HistoryStore
 
 
+def pytest_addoption(parser):
+    parser.addoption(
+        "--exe", action="store", default=None,
+        help="built exe under test for tests/smoke_exe.py (skipped when unset)",
+    )
+
+
 def _reset_hub_state() -> None:
     hub._connections.clear()
     hub._history.clear()

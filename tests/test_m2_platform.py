@@ -127,13 +127,13 @@ async def test_hello_and_devices_list(open_hub, client):
     assert client.get("/api/devices").json()["connection_count"] == 0
 
 
-def test_hello_ignored_when_unauthenticated(open_hub):
+def test_hello_ignored_when_unauthenticated(open_hub, tmp_path):
     import asyncio
 
     from server.hub import SyncHub
 
     async def _check():
-        h = SyncHub(trust_store=TrustStore(":memory:"), store=__import__(
+        h = SyncHub(trust_store=TrustStore(tmp_path / "s.json"), store=__import__(
             "server.store", fromlist=["HistoryStore"]).HistoryStore(":memory:"))
         try:
             assert h._trust.require_pin is True
