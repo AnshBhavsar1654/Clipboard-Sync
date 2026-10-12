@@ -1,4 +1,4 @@
-"""System tray icon + menu (plan §4.5). Runs on its own thread."""
+"""System tray icon + menu. Runs on its own thread."""
 
 from __future__ import annotations
 

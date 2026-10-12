@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
-from typing import Any, Literal
+from datetime import UTC, datetime
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
 def get_utc_now_iso() -> str:
     """Return ISO-formatted current UTC timestamp."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 class ClipboardItem(BaseModel):
@@ -26,7 +27,7 @@ class ClipboardItem(BaseModel):
     file_url: str | None = None
     entry_count: int | None = None
     skipped_count: int | None = None
-    thumb: str | None = None  # ≤24 KB data-URI preview (plan §2.2)
+    thumb: str | None = None  # ≤24 KB data-URI preview
 
     def to_message_dict(self) -> dict[str, Any]:
         """Convert to standard broadcast dictionary payload."""
@@ -50,12 +51,3 @@ class ClipboardItem(BaseModel):
         if self.thumb is not None:
             data["thumb"] = self.thumb
         return data
-
-
-class HistoryMessage(BaseModel):
-    """Payload sent upon initial client connection with recent clipboard items."""
-
-    type: Literal["history"] = "history"
-    device_id: str = "server"
-    timestamp: str = Field(default_factory=get_utc_now_iso)
-    items: list[dict[str, Any]]

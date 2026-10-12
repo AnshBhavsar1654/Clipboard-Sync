@@ -1,4 +1,4 @@
-"""Global Ctrl+Shift+V quick-paste hotkey (plan §4.2/§4.6, Windows only).
+"""Global Ctrl+Shift+V quick-paste hotkey.
 
 Records the foreground window before firing so paste-through can refocus it.
 No-op on other platforms (import-safe everywhere).

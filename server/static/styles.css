@@ -816,7 +816,7 @@ textarea:focus-visible,
   text-decoration: none;
 }
 
-/* Per-item actions (plan §3.6) */
+/* Per-item actions */
 .mini-btn {
   background: transparent;
   border: 1px solid var(--border);
@@ -862,7 +862,7 @@ textarea:focus-visible,
   border-radius: var(--radius);
 }
 
-/* Accessibility: visible focus + reduced motion (plan §3.6) */
+/* Accessibility: visible focus + reduced motion */
 :focus-visible {
   outline: 2px solid var(--primary);
   outline-offset: 2px;

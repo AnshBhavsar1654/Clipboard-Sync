@@ -1,4 +1,4 @@
-"""M2 part 1: metadata-only socket (plan §2.2) + Ctrl+V promise (plan §2.7)."""
+"""Metadata-only sockets, thumbnails, and landing received items on the clipboard."""
 
 from __future__ import annotations
 
@@ -27,7 +27,6 @@ def open_hub(tmp_path, monkeypatch):
     hub._connections.clear()
     hub._history.clear()
     hub._auth.clear()
-    hub._auth_failures.clear()
     hub._hosts.clear()
     (tmp_path / "shared").mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr("server.main.UPLOADS_DIR", tmp_path / "shared")
@@ -35,7 +34,6 @@ def open_hub(tmp_path, monkeypatch):
     hub._connections.clear()
     hub._history.clear()
     hub._auth.clear()
-    hub._auth_failures.clear()
     hub._hosts.clear()
     hub._trust = old_trust
 

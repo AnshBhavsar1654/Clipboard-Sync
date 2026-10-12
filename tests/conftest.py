@@ -1,4 +1,4 @@
-"""Global test isolation: the hub persists history to SQLite (plan §2.9), so
+"""Global test isolation: the hub persists history to SQLite, so
 every test gets a throwaway store — never the real app database."""
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ def _reset_hub_state() -> None:
     hub._connections.clear()
     hub._history.clear()
     hub._auth.clear()
-    hub._auth_failures.clear()
     hub._hosts.clear()
     hub._devices.clear()
     hub._last_seen.clear()
@@ -55,3 +54,15 @@ def _isolated_hub_store(tmp_path):
     hub._store = old_store
     hub.uploads_dir = old_uploads
     store.close()
+
+
+@pytest.fixture(autouse=True)
+def _isolated_trust_store(tmp_path):
+    """Tests flip require_pin / trust devices; that must never touch the real
+    ~/.clipboardsync/server_state.json (it once left a developer's PIN off)."""
+    from server.auth import TrustStore
+
+    old = hub._trust
+    hub._trust = TrustStore(tmp_path / "trust_state.json")
+    yield
+    hub._trust = old

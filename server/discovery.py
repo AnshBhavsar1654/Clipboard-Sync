@@ -2,7 +2,7 @@
 
 Uses UDP broadcast (no internet needed). Payload is name/IP/port only —
 never clipboard data. When UDP is blocked (guest Wi-Fi, firewall, VPN),
-the GUI falls back to manual address + code entry.
+the window falls back to manual address + code entry.
 """
 
 from __future__ import annotations
@@ -11,6 +11,8 @@ import json
 import socket
 import threading
 import time
+
+from server.net import lan_ips
 
 BEACON_PORT = 37020
 BEACON_INTERVAL = 3.0
@@ -25,18 +27,6 @@ def get_pc_name() -> str:
     except Exception:
         name = "Computer"
     return name[:40]
-
-
-def get_lan_ip() -> str:
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("8.8.8.8", 80))
-            return str(s.getsockname()[0])
-    except Exception:
-        try:
-            return str(socket.gethostbyname(socket.gethostname()))
-        except Exception:
-            return "127.0.0.1"
 
 
 class PeerDiscovery:
@@ -100,11 +90,11 @@ class PeerDiscovery:
             except OSError:
                 return
             sock.settimeout(1.0)
-            own_ip = get_lan_ip()
+            own_ips = set(lan_ips())
             while self._running:
                 try:
                     data, addr = sock.recvfrom(1024)
-                except socket.timeout:
+                except TimeoutError:
                     continue
                 except Exception:
                     continue
@@ -115,7 +105,7 @@ class PeerDiscovery:
                 if msg.get("magic") != MAGIC or msg.get("v") != PROTOCOL_VERSION:
                     continue
                 ip = addr[0]
-                if ip == own_ip or ip in ("127.0.0.1", "::1"):
+                if ip in own_ips or ip in ("127.0.0.1", "::1"):
                     continue
                 try:
                     port = int(msg.get("port", 8000))

@@ -1,4 +1,4 @@
-"""Phase 4: admin API gate, desktop shell pieces (plan §4.1/§4.6)."""
+"""Desktop app: admin API, pause, host guard, shell helpers, tray and hotkey."""
 
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ def admin_hub(tmp_path, monkeypatch):
     hub._connections.clear()
     hub._history.clear()
     hub._auth.clear()
-    hub._auth_failures.clear()
     hub._hosts.clear()
     hub._devices.clear()
     hub._last_seen.clear()
@@ -43,9 +42,9 @@ def test_admin_gate(admin_hub, client):
     r = client.get("/api/admin/state", params=_t())
     assert r.status_code == 200
     body = r.json()
-    for key in ("version", "running", "engine_running", "port", "pairing_url",
+    for key in ("version", "engine_running", "port", "pairing_url",
                 "pairing_pin", "require_pin", "connection_count", "devices",
-                "phones", "trusted_ids", "history", "settings", "uptime_seconds"):
+                "phones", "peer", "nearby", "history", "settings"):
         assert key in body, key
 
 
@@ -62,9 +61,7 @@ def test_admin_pairing_rotate_and_remove(admin_hub, client):
     second = client.post("/api/admin/pairing/new", params=_t()).json()["pin"]
     assert first != second and len(second) == 6
 
-    admin_hub._trust.trust("Old-Phone")
-    assert client.delete("/api/admin/devices/Old-Phone", params=_t()).json() == {"ok": True}
-    assert "Old-Phone" not in admin_hub._trust.trusted_devices()
+    assert client.delete("/api/admin/devices/nobody", params=_t()).status_code == 404
 
     token = admin_hub._trust.issue_token("Pixel")
     phones = client.get("/api/admin/state", params=_t()).json()["phones"]
@@ -130,6 +127,7 @@ def test_admin_share_files(admin_hub, client, tmp_path):
 def test_desktop_page_served(admin_hub, client):
     html = client.get("/desktop/").text
     assert 'id="search"' in html and 'id="list"' in html and 'id="drawer"' in html
+    assert 'id="connect-dialog"' in html and 'style="' not in html  # CSP: no inline styles
     assert "<script>" not in html  # no inline scripts (CSP script-src 'self')
     assert 'src="desktop.js"' in html
     assert client.get("/desktop/desktop.js").status_code == 200
@@ -152,7 +150,11 @@ def test_shell_api_safe_without_engine():
 
     api = ShellApi(engine=type("E", (), {"_client_app": None, "_loop": None})(),
                    get_window=lambda w: None, get_last_hwnd=lambda: 0)
-    assert api.reveal("") is False
+    assert api.save_item("", "x")["ok"] is False
+    assert api.save_item("http://evil.example/api/files/ab12cd34", "x")["ok"] is False
+    assert api.save_item("javascript:alert", "x")["ok"] is False
+    assert api.open_url("file:///c:/windows/system32/calc.exe") is False
+    assert api.pick_files() == []
     assert api.share_clipboard_now() is False
     assert api.paste_to_last_app("hi") is False
     api.close_window()
@@ -181,3 +183,84 @@ def test_hotkey_lifecycle():
     finally:
         if thread is not None:
             thread.stop()
+
+
+# -- pause + identity ---------------------------------------------------------------
+
+
+def test_pause_drops_remote_clips_but_keeps_server(admin_hub, client):
+    admin.set_engine_controller(lambda: setattr(admin_hub, "paused", False),
+                                lambda: setattr(admin_hub, "paused", True),
+                                lambda: not admin_hub.paused)
+    admin_hub._trust.require_pin = False
+    try:
+        client.post("/api/admin/engine", params=_t(), json={"action": "stop"})
+        assert client.get("/api/admin/state", params=_t()).json()["engine_running"] is False
+        with client.websocket_connect("/ws") as ws:
+            ws.receive_json()  # history
+            ws.send_json({"type": "text", "content": "while paused", "device_id": "Phone-A"})
+            assert ws.receive_json()["type"] == "paused"
+        assert admin_hub.get_history() == []
+        client.post("/api/admin/engine", params=_t(), json={"action": "start"})
+        assert client.get("/api/admin/state", params=_t()).json()["engine_running"] is True
+    finally:
+        admin_hub.paused = False
+        admin.set_engine_controller(None, None, None)
+
+
+def test_state_reports_identity(admin_hub, client):
+    admin.set_identity("pc-123")
+    try:
+        body = client.get("/api/admin/state", params=_t()).json()
+        assert body["this_device_id"] == "pc-123" and body["computer_name"]
+    finally:
+        admin.set_identity("This computer")
+
+
+def test_settings_listener_fires(admin_hub, client):
+    calls: list = []
+    admin.set_settings_listener(lambda: calls.append(1))
+    try:
+        client.post("/api/admin/settings", params=_t(), json={"receive_folder": "Y"})
+        assert calls == [1]
+    finally:
+        admin.set_settings_listener(None)
+
+
+# -- DNS-rebinding guard -------------------------------------------------------------
+
+
+def test_host_allowlist():
+    from server.main import _host_allowed
+
+    for ok in ("127.0.0.1:8000", "localhost", "[::1]:8000", "192.168.1.5:8000", "desk.local:8000"):
+        assert _host_allowed(ok), ok
+    for bad in ("evil.example", "evil.example:8000", "", "127.0.0.1.evil.example"):
+        assert not _host_allowed(bad), bad
+
+
+def test_loopback_with_foreign_host_is_refused():
+    import asyncio
+
+    from server.main import RebindingGuard
+
+    sent: list = []
+
+    async def inner(scope, receive, send):
+        sent.append("reached-app")
+
+    async def run(host, client_host):
+        out: list = []
+
+        async def send(msg):
+            out.append(msg)
+
+        scope = {"type": "http", "client": (client_host, 5555), "headers": [(b"host", host)]}
+        await RebindingGuard(inner)(scope, None, send)
+        return out
+
+    refused = asyncio.run(run(b"evil.example:8000", "127.0.0.1"))
+    assert refused[0]["status"] == 403 and not sent
+    asyncio.run(run(b"127.0.0.1:8000", "127.0.0.1"))
+    asyncio.run(run(b"anything.example", "192.168.1.9"))  # LAN callers are token-gated instead
+    assert sent == ["reached-app", "reached-app"]

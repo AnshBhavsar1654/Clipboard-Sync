@@ -1,4 +1,4 @@
-"""Clipboard backend abstraction (Phase 0.2).
+"""Clipboard backend abstraction.
 
 Goal: isolate Windows-only Win32 clipboard code behind a thin interface so
 the rest of the client can be unit-tested on CI without a real clipboard.
@@ -6,7 +6,7 @@ the rest of the client can be unit-tested on CI without a real clipboard.
 - ``ClipboardBackend``: minimal interface used by ``ClipboardMonitor``.
 - ``Win32ClipboardBackend``: real implementation (Windows only, lazy imports).
 - ``FakeClipboardBackend``: in-memory implementation for tests / non-Windows CI.
-- ``fingerprint_payload``: pure full-content hash (Phase 2.3 contract). Two
+- ``fingerprint_payload``: pure full-content hash. Two
   payloads sharing only a prefix must NOT collide (the old ``[:100]`` key did).
 """
 
@@ -24,9 +24,8 @@ def fingerprint_payload(payload: dict[str, Any]) -> str:
     """Return a stable SHA-256 fingerprint of the full clipboard payload.
 
     Hashes ``type`` plus the full ``content`` / ``filepath`` / ``filename``
-    and raw ``image_bytes`` when present. This is the Phase 2.3 replacement
-    for the old ``str(content)[:100]`` dedupe key, which collided for two
-    different long URLs sharing a 100-char prefix.
+    and raw ``image_bytes`` when present. A prefix-only key would
+    collide for two different long URLs sharing their first 100 characters.
     """
     h = hashlib.sha256()
     h.update(str(payload.get("type", "")).encode("utf-8"))
@@ -40,7 +39,7 @@ def fingerprint_payload(payload: dict[str, Any]) -> str:
     return h.hexdigest()
 
 
-# Clipboard formats that mean "do not record / do not share" (plan §2.6).
+# Clipboard formats that mean "do not record / do not share".
 # Honored by password managers and Windows' own clipboard history.
 _EXCLUDE_FORMAT_NAMES = (
     "ExcludeClipboardContentFromMonitorProcessing",
@@ -48,7 +47,7 @@ _EXCLUDE_FORMAT_NAMES = (
     "CanUploadToCloudClipboard",  # DWORD 0 = exclude
 )
 
-# Best-effort owner blocklist for password managers (plan §2.6).
+# Best-effort owner blocklist for password managers.
 BLOCKED_OWNER_EXES = frozenset(
     {
         "keepass.exe",
@@ -76,7 +75,7 @@ class ClipboardBackend(Protocol):
         """Inspect the OS clipboard, return a payload dict or None.
 
         With ``skip_private`` (default), clips marked do-not-record by
-        password managers are reported as None (plan §2.6).
+        password managers are reported as None.
         """
         ...
 
@@ -88,14 +87,14 @@ class ClipboardBackend(Protocol):
         ...
 
     def write_files(self, paths: list[Path]) -> None:
-        """Put file paths on the clipboard as CF_HDROP (Phase 2.7)."""
+        """Put file paths on the clipboard as CF_HDROP."""
         ...
 
     def read_text(self) -> str | None:
         ...
 
     def sequence_number(self) -> int:
-        """Monotonic clipboard sequence number for echo suppression (Phase 2.4)."""
+        """Monotonic clipboard sequence number for echo suppression."""
         ...
 
 
@@ -172,7 +171,7 @@ class Win32ClipboardBackend:
 
     def _is_private_clip(self) -> bool:
         """True when the current clip is marked do-not-record or owned by a
-        blocked password-manager app (plan §2.6). Never raises."""
+        blocked password-manager app. Never raises."""
         try:
             import win32clipboard
         except ImportError:
@@ -319,7 +318,7 @@ class Win32ClipboardBackend:
         except ImportError:
             return None
         # OpenClipboard fails while another app holds the clipboard (very
-        # common right after a copy) — retry instead of losing it (plan §2.5).
+        # common right after a copy) — retry instead of losing it.
         import time as _time
 
         for attempt in range(10):

@@ -1,4 +1,4 @@
-"""Image thumbnail helper (plan §2.2).
+"""Image thumbnail helper.
 
 Lists render instantly from a ≤24 KB data-URI thumb; full bytes always travel
 through /api/upload + /api/files/{id}, never inside the WebSocket.

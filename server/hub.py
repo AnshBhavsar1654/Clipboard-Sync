@@ -6,24 +6,24 @@ import asyncio
 import logging
 import re
 import time
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+
 from fastapi import WebSocket
 
-from server.auth import MAX_PIN_FAILS, TrustStore, get_store, is_loopback_host
+from server.auth import TrustStore, get_store, is_loopback_host
 from server.models import ClipboardItem, get_utc_now_iso
 from server.store import HistoryStore
 
 logger = logging.getLogger(__name__)
 
-MAX_AUTH_FAILURES = MAX_PIN_FAILS
-
-# The socket carries metadata only (plan §2.2): bytes go through /api/upload.
-# Anything bigger is a legacy blob or abuse — dropped, never stored.
+# The socket carries metadata only: bytes go through /api/upload.
+# Anything bigger is abuse or a misbehaving client: dropped, never stored.
 MAX_MESSAGE_BYTES = 256 * 1024
 
-# Only URLs this server handed out via /api/upload are forwarded (plan §1.6).
+# Only URLs this server handed out via /api/upload are forwarded.
 # The desktop client uploads bytes first and shares metadata, so a file_url
 # of any other shape (javascript:, http://evil/…) is dropped, never forwarded.
 _FILE_URL_RE = re.compile(r"^/api/files/[0-9a-f]{8,64}(\.[A-Za-z0-9]{1,10})?([?#].*)?$")
@@ -68,16 +68,17 @@ class SyncHub:
         self._connections: set[WebSocket] = set()
         self._history: list[ClipboardItem] = []
         self._auth: dict[WebSocket, bool] = {}
-        self._auth_failures: dict[WebSocket, int] = {}
         self._hosts: dict[WebSocket, str] = {}
         self._devices: dict[WebSocket, dict[str, Any]] = {}
         self._last_seen: dict[WebSocket, float] = {}
         self._pinned: set[str] = set()
         self._trust: TrustStore = trust_store or get_store()
         self._store: HistoryStore = store or HistoryStore()
+        self._listeners: list[Callable[[dict[str, Any]], Awaitable[None]]] = []
+        self.paused = False  # "Pause sharing": clips are dropped, the server stays up
         self.uploads_dir: Path | None = None  # set by server.main (avoids import cycle)
         self._lock = asyncio.Lock()
-        # History survives restarts (plan §2.9).
+        # History survives restarts.
         try:
             for msg in self._store.load_recent(max_history):
                 if msg.pop("pinned", False):
@@ -86,10 +87,19 @@ class SyncHub:
         except Exception as exc:
             logger.warning("Could not load persisted history: %s", exc)
 
+    def add_listener(self, callback: Callable[[dict[str, Any]], Awaitable[None]]) -> None:
+        """Be told about every clip accepted here (except relayed ones)."""
+        if callback not in self._listeners:
+            self._listeners.append(callback)
+
+    def remove_listener(self, callback: Callable[[dict[str, Any]], Awaitable[None]]) -> None:
+        if callback in self._listeners:
+            self._listeners.remove(callback)
+
     @property
     def connection_count(self) -> int:
         """Authenticated remote devices only; the desktop app's own loopback
-        socket is not a phone (plan §2.10)."""
+        socket is not a phone."""
         return sum(
             1
             for ws, auth in self._auth.items()
@@ -101,7 +111,7 @@ class SyncHub:
         return [item.to_message_dict() for item in self._history]
 
     def devices(self) -> list[dict[str, Any]]:
-        """Authenticated remote devices (plan §2.10): id, name, kind, ip, since."""
+        """Authenticated remote devices: id, name, kind, ip, since."""
         out: list[dict[str, Any]] = []
         for ws, auth in self._auth.items():
             if not auth or is_loopback_host(self._hosts.get(ws, "")):
@@ -138,11 +148,8 @@ class SyncHub:
                 self._pinned.discard(clip_id)
         self._store.set_pinned(clip_id, pinned)
 
-    def is_pinned(self, clip_id: str) -> bool:
-        return clip_id in self._pinned
-
     async def remove_item(self, clip_id: str) -> bool:
-        """Delete a clip everywhere incl. its file when unreferenced (plan §2.9/§3.6)."""
+        """Delete a clip everywhere incl. its file when unreferenced."""
         async with self._lock:
             found = next((i for i in self._history if i.id == clip_id), None)
             self._history = [i for i in self._history if i.id != clip_id]
@@ -154,7 +161,7 @@ class SyncHub:
         return True
 
     async def clear_history(self) -> None:
-        """Really delete history (plan §2.9); pinned files are exempt."""
+        """Really delete history; pinned files are exempt."""
         async with self._lock:
             self._history.clear()
         self._store.clear()
@@ -216,7 +223,7 @@ class SyncHub:
     # -- connection lifecycle ----------------------------------------------
     async def connect(self, websocket: WebSocket) -> None:
         """Register a new WebSocket connection and, if auto-approved, send history."""
-        # Same-origin check on the handshake (plan §1.4): a browser page from
+        # Same-origin check on the handshake: a browser page from
         # another site must not be able to open a socket to us.
         try:
             headers = getattr(websocket, "headers", {}) or {}
@@ -231,7 +238,6 @@ class SyncHub:
         async with self._lock:
             self._connections.add(websocket)
             self._auth[websocket] = False
-            self._auth_failures[websocket] = 0
             self._hosts[websocket] = self._client_host(websocket)
         self._touch(websocket)
 
@@ -241,9 +247,8 @@ class SyncHub:
         except Exception:
             cookie_token = None
 
-        # Trusted at once: localhost (the desktop app), open mode, or a phone
-        # presenting the server-issued pairing cookie (plan §1.2). The legacy
-        # device_id/PIN messages below stay for older cached phone pages.
+        # Trusted at once: this computer, open mode, or a device presenting the
+        # pairing cookie issued by /api/pair.
         if (
             self._is_localhost(websocket)
             or not self._trust.require_pin
@@ -254,15 +259,16 @@ class SyncHub:
                 self._auth[websocket] = True
             try:
                 await self._send_history(websocket)
-                logger.info("Client connected (auto-approved). Active connections: %d", self.connection_count)
+                logger.info("Client connected. Active connections: %d", self.connection_count)
             except Exception as exc:
                 logger.warning("Failed to send history to new connection: %s", exc)
                 await self.disconnect(websocket)
             return
 
-        # Other clients identify themselves via an auth_request/auth_pin message; the
-        # client sends auth_request immediately on open, so no pre-emptive prompt here
-        # (avoids flashing the PIN screen for already-trusted devices).
+        try:
+            await websocket.send_json({"type": "auth_required", "device_id": "server"})
+        except Exception:
+            pass
         logger.info("Client connected (awaiting pairing). Active connections: %d", len(self._connections))
 
     async def disconnect(self, websocket: WebSocket) -> None:
@@ -270,7 +276,6 @@ class SyncHub:
         async with self._lock:
             self._connections.discard(websocket)
             self._auth.pop(websocket, None)
-            self._auth_failures.pop(websocket, None)
             self._hosts.pop(websocket, None)
             self._devices.pop(websocket, None)
             self._last_seen.pop(websocket, None)
@@ -280,7 +285,7 @@ class SyncHub:
         self._last_seen[websocket] = time.time()
 
     async def close_silent_sockets(self, max_silent_seconds: float = 90) -> int:
-        """Drop non-loopback sockets with no app-level traffic (plan §3.3).
+        """Drop non-loopback sockets with no app-level traffic.
 
         Mobile browsers freeze background tabs; the socket looks open but is
         dead. Loopback (this computer) is exempt — the desktop client sends
@@ -303,74 +308,15 @@ class SyncHub:
             logger.info("Closed %d silent socket(s).", len(stale))
         return len(stale)
 
-    # -- auth handling -----------------------------------------------------
-    async def _handle_auth_request(self, sender: WebSocket, message: dict[str, Any]) -> None:
-        device_id = str(message.get("device_id", "")).strip()
-        is_local = self._is_localhost(sender)
-        approved = is_local or not self._trust.require_pin or (
-            bool(device_id) and self._trust.is_trusted(device_id)
-        )
-        if approved:
-            self._note_device(sender, device_id=device_id)
-            async with self._lock:
-                self._auth[sender] = True
-            try:
-                await sender.send_json({"type": "auth_success", "device_id": "server"})
-                await self._send_history(sender)
-                logger.info("Device '%s' authenticated (remembered). Active connections: %d", device_id, self.connection_count)
-            except Exception as exc:
-                logger.warning("Failed to send history after auth: %s", exc)
-                await self.disconnect(sender)
-        else:
-            await sender.send_json({"type": "auth_required", "device_id": "server"})
-
-    async def _handle_auth_pin(self, sender: WebSocket, message: dict[str, Any]) -> None:
-        device_id = str(message.get("device_id", "")).strip()
-        pin = str(message.get("pin", ""))
-        ip = self._client_host(sender)
-        # Throttle by client IP so reconnecting does not reset the limit (plan §1.1).
-        if self._trust.locked_out(ip):
-            logger.warning("Locked-out IP '%s' attempted PIN auth.", ip)
-            await sender.send_json(
-                {"type": "auth_error", "message": "Too many tries. Wait a few minutes or ask for a new code."}
-            )
-            return
-        if self._trust.validate_pin(pin):
-            self._trust.clear_fails(ip)
-            if device_id:
-                self._trust.trust(device_id)
-            self._note_device(sender, device_id=device_id)
-            self._trust.regenerate_pin()  # single-use code (plan §1.1)
-            async with self._lock:
-                self._auth[sender] = True
-            logger.info("Device '%s' authenticated via PIN. Active connections: %d", device_id, self.connection_count)
-            try:
-                await sender.send_json({"type": "auth_success", "device_id": "server"})
-                await self._send_history(sender)
-            except Exception as exc:
-                logger.warning("Failed to send history after PIN auth: %s", exc)
-                await self.disconnect(sender)
-            return
-
-        self._trust.record_fail(ip)
-        if self._trust.locked_out(ip):
-            logger.warning("IP '%s' failed PIN %d times. Locking out.", ip, MAX_AUTH_FAILURES)
-            await sender.send_json(
-                {"type": "auth_error", "message": "Too many tries. Wait a few minutes or ask for a new code."}
-            )
-            try:
-                await sender.close(code=1013)
-            except Exception:
-                pass
-            await self.disconnect(sender)
-        else:
-            await sender.send_json(
-                {"type": "auth_error", "message": "That code did not match."}
-            )
-
     # -- message handling --------------------------------------------------
-    async def handle_message(self, sender: WebSocket, message: dict[str, Any]) -> None:
-        """Process an incoming clipboard event and broadcast to other connected peers."""
+    async def handle_message(
+        self, sender: WebSocket | None, message: dict[str, Any], relayed: bool = False
+    ) -> None:
+        """Process an incoming clipboard event and broadcast to other connected peers.
+
+        ``relayed`` marks clips that arrived from a linked computer, so they are
+        shown and broadcast here but never sent back to it.
+        """
         msg_type = message.get("type", "text")
         if sender is not None:
             self._touch(sender)
@@ -382,7 +328,7 @@ class SyncHub:
                 pass
             return
         if msg_type == "hello":
-            # Device identity for the device list (plan §2.10). Only from
+            # Device identity for the device list. Only from
             # authenticated sockets; the cookie path has no device_id yet.
             if self._is_authenticated(sender):
                 self._note_device(
@@ -392,14 +338,17 @@ class SyncHub:
                     kind=str(message.get("kind", "")).strip(),
                 )
             return
-        if msg_type == "auth_request":
-            await self._handle_auth_request(sender, message)
-            return
-        if msg_type == "auth_pin":
-            await self._handle_auth_pin(sender, message)
-            return
         if not self._is_authenticated(sender):
             logger.warning("Ignoring message from unauthenticated connection: %s", message)
+            return
+
+        if self.paused and (sender is not None or relayed):
+            # Tell the sender instead of silently losing the clip. Files the
+            # user picks in the desktop window (sender is None) still go out.
+            try:
+                await sender.send_json({"type": "paused", "device_id": "server"})
+            except Exception:
+                pass
             return
 
         content_type = message.get("type", "text")
@@ -417,7 +366,7 @@ class SyncHub:
             )
             return
 
-        # Never forward a file_url this server did not hand out (plan §1.6):
+        # Never forward a file_url this server did not hand out:
         # javascript:… runs script on the phone, http://evil/… pulls malware
         # onto the desktop. Relative links stay relative so PC-to-PC relays
         # keep working against the right host.
@@ -431,7 +380,7 @@ class SyncHub:
             filename = filename[:_MAX_FILENAME_LEN]
 
         # Echoed to live peers only (never stored): lets the sending phone
-        # swap its optimistic card for the real item (plan §3.6).
+        # swap its optimistic card for the real item.
         client_id = message.get("client_id")
         if not isinstance(client_id, str) or len(client_id) > 64:
             client_id = None
@@ -476,7 +425,7 @@ class SyncHub:
         logger.info("Broadcasting clipboard clip (%s) from device '%s' to %d peers", content_type, device_id, len(peers))
 
         # One slow phone must not delay the rest, and a failing peer must not
-        # disturb iteration over the others (plan §2.14).
+        # disturb iteration over the others.
         async def _send_to(ws: WebSocket) -> WebSocket | None:
             try:
                 await ws.send_json(payload)
@@ -489,3 +438,10 @@ class SyncHub:
         for ws in failed:
             if ws is not None:
                 await self.disconnect(ws)
+
+        if not relayed:
+            for callback in list(self._listeners):
+                try:
+                    await callback(payload)
+                except Exception as exc:
+                    logger.warning("Clip listener failed: %s", exc)

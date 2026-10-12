@@ -1,11 +1,8 @@
-"""Phase 0.1 regression safety net (IMPLEMENTATION_PLAN.md).
+"""Pairing gate on the HTTP API, filename handling, clip dedupe and the fake clipboard.
 
-These tests documented bugs verified in the plan and now pass against the
-Phase 1/2 fixes:
-- authenticated /api/history + /api/upload (plan §1.2)
-- unicode filenames keep their extension (plan §1.8/§2.14)
-- PIN brute-force throttle survives reconnects (plan §1.1)
-- desktop loopback socket not counted as a "phone" (plan §2.10)
+Covers: /api/history and /api/upload need pairing; pairing is throttled per IP;
+Unicode filenames keep their extension; this computer's own socket is not
+counted as a phone; two long clips with a common prefix are both synced.
 """
 
 from __future__ import annotations
@@ -18,21 +15,19 @@ from server.main import hub
 
 @pytest.fixture()
 def locked_hub(tmp_path, monkeypatch):
-    """Isolate the global hub with a PIN-required trust store (plan §0.1)."""
+    """Isolate the global hub with a PIN-required trust store."""
     store = TrustStore(tmp_path / "state.json")  # require_pin defaults True
     old_trust = hub._trust
     hub._trust = store
     hub._connections.clear()
     hub._history.clear()
     hub._auth.clear()
-    hub._auth_failures.clear()
     monkeypatch.setattr("server.main.UPLOADS_DIR", tmp_path / "shared")
     (tmp_path / "shared").mkdir(parents=True, exist_ok=True)
     yield hub
     hub._connections.clear()
     hub._history.clear()
     hub._auth.clear()
-    hub._auth_failures.clear()
     hub._trust = old_trust
 
 
@@ -50,19 +45,6 @@ def test_unicode_filename_keeps_extension():
 
     assert _sanitize_filename("रिपोर्ट.pdf").endswith(".pdf")
     assert _sanitize_filename("写真.jpg").endswith(".jpg")
-
-
-def test_pin_bruteforce_is_throttled_across_reconnects(locked_hub, client):
-    c = client
-    for _ in range(20):
-        with c.websocket_connect("/ws") as ws:
-            ws.send_json({"type": "auth_pin", "device_id": "x", "pin": "000000"})
-            ws.receive_json()  # auth_error, connection stays open (1 fail each)
-    with c.websocket_connect("/ws") as ws:
-        ws.send_json(
-            {"type": "auth_pin", "device_id": "x", "pin": locked_hub._trust.pairing_pin}
-        )
-        assert ws.receive_json()["type"] == "auth_error"  # still locked out
 
 
 class _FakeSocket:
@@ -95,7 +77,7 @@ async def test_local_client_not_counted_as_phone(locked_hub):
 
 
 def test_pair_then_history_and_upload(locked_hub, client):
-    """The gate blocks strangers but lets a paired phone through (plan §1.2)."""
+    """The gate blocks strangers but lets a paired phone through."""
     c = client
     assert c.get("/api/history").status_code == 401
     r = c.post("/api/pair", json={"pin": locked_hub._trust.pairing_pin, "name": "Pixel"})
@@ -114,7 +96,7 @@ def test_pair_wrong_pin_rejected_then_throttled(locked_hub, client):
 
 
 def test_dedupe_uses_full_content_hash():
-    """Two 112-char URLs sharing a 100-char prefix must NOT collide (plan §2.3)."""
+    """Two 112-char URLs sharing a 100-char prefix must NOT collide."""
     from client.clipboard_backend import fingerprint_payload
 
     prefix = "https://example.com/" + "a" * 80  # exactly 100 chars
@@ -123,10 +105,10 @@ def test_dedupe_uses_full_content_hash():
     url_b = prefix + "BBBBBBBBBBBB"  # 112 chars, same first 100 chars
     assert len(url_a) == len(url_b) == 112
 
-    # Documents the verified bug: the old key collides.
+    # A prefix-only key would collide.
     assert url_a[:100] == url_b[:100]
 
-    # The Phase 2.3 contract: full-content hash distinguishes them.
+    # The full-content hash tells them apart.
     fa = fingerprint_payload({"type": "text", "content": url_a})
     fb = fingerprint_payload({"type": "text", "content": url_b})
     assert fa != fb
@@ -135,7 +117,7 @@ def test_dedupe_uses_full_content_hash():
 
 
 def test_fake_clipboard_backend_roundtrip():
-    """FakeClipboard works on CI without Win32 (plan §0.2)."""
+    """FakeClipboard works on CI without Win32."""
     from client.clipboard_backend import FakeClipboardBackend
 
     fake = FakeClipboardBackend()

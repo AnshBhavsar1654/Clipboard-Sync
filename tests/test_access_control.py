@@ -1,4 +1,4 @@
-"""Phase 5.3: auth matrix, store retention, big-frame regression (plan §5.3)."""
+"""Who may reach which endpoint, history retention, and oversized frames."""
 
 from __future__ import annotations
 
@@ -78,7 +78,7 @@ def test_store_retention_and_pins(tmp_path):
 
 @pytest.mark.asyncio
 async def test_big_history_frame_does_not_break_client():
-    """5 MB frames must reach on_message (plan §5.3: the 1009 regression)."""
+    """5 MB frames must reach on_message."""
     from client.websocket_client import WebSocketClient
 
     seen: list = []

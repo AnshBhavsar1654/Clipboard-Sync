@@ -1,4 +1,5 @@
-"""M1 (secure & stable core) tests: each fix in IMPLEMENTATION_PLAN.md §M1."""
+"""Security and robustness: URL validation, cookie auth, cross-site writes, safe file names,
+clipboard echo suppression, and the folder-zip path."""
 
 from __future__ import annotations
 
@@ -21,14 +22,12 @@ def locked_hub(tmp_path, monkeypatch):
     hub._connections.clear()
     hub._history.clear()
     hub._auth.clear()
-    hub._auth_failures.clear()
     hub._hosts.clear()
     _patch_uploads_dir(tmp_path, monkeypatch)
     yield hub
     hub._connections.clear()
     hub._history.clear()
     hub._auth.clear()
-    hub._auth_failures.clear()
     hub._hosts.clear()
     hub._trust = old_trust
 
@@ -42,19 +41,17 @@ def open_hub(tmp_path, monkeypatch):
     hub._connections.clear()
     hub._history.clear()
     hub._auth.clear()
-    hub._auth_failures.clear()
     hub._hosts.clear()
     _patch_uploads_dir(tmp_path, monkeypatch)
     yield hub
     hub._connections.clear()
     hub._history.clear()
     hub._auth.clear()
-    hub._auth_failures.clear()
     hub._hosts.clear()
     hub._trust = old_trust
 
 
-# -- plan §1.6: file_url validation -------------------------------------------
+# -- file_url validation -------------------------------------------
 
 
 def test_hub_drops_untrusted_file_url(open_hub, client):
@@ -93,7 +90,7 @@ def test_is_allowed_file_url_shapes():
     assert not is_allowed_file_url("")
 
 
-# -- plan §1.2: WS cookie auth --------------------------------------------------
+# -- WS cookie auth --------------------------------------------------
 
 
 def test_websocket_cookie_auth_skips_pin(locked_hub, client):
@@ -105,7 +102,7 @@ def test_websocket_cookie_auth_skips_pin(locked_hub, client):
         assert first["type"] == "history"  # auto-approved via cookie, no PIN screen
 
 
-# -- plan §1.4: cross-site write rejection --------------------------------------
+# -- cross-site write rejection --------------------------------------
 
 
 def test_cross_site_post_blocked(locked_hub, client):
@@ -121,7 +118,7 @@ def test_cross_site_post_blocked(locked_hub, client):
     assert ok.status_code == 401
 
 
-# -- plan §1.5: uploads outside the static mount --------------------------------
+# -- uploads outside the static mount --------------------------------
 
 
 def test_uploads_not_served_from_static(client):
@@ -131,7 +128,7 @@ def test_uploads_not_served_from_static(client):
     assert c.get("/uploads/anything.bat").status_code == 404
 
 
-# -- plan §2.1: no 1 MiB client receive limit ------------------------------------
+# -- no 1 MiB client receive limit ------------------------------------
 
 
 def test_websocket_client_has_no_size_limit():
@@ -144,7 +141,7 @@ def test_websocket_client_has_no_size_limit():
     assert client._connect_kwargs()["max_size"] is None
 
 
-# -- plan §1.8: safe_name / unique_path ------------------------------------------
+# -- safe_name / unique_path ------------------------------------------
 
 
 def test_safe_name_blocks_traversal_and_keeps_unicode():
@@ -173,7 +170,7 @@ def test_unique_path_stays_inside_and_dedupes(tmp_path):
     assert second.resolve().parent == d.resolve()
 
 
-# -- plan §2.3/§2.4: monitor dedupe + echo suppression ----------------------------
+# -- monitor dedupe + echo suppression ----------------------------
 
 
 def _make_monitor():
@@ -233,7 +230,7 @@ def test_seq_wrap_compare():
     assert not _seq_is_newer(0xFFFFFFFF, 0)
 
 
-# -- plan §1.6 (client): foreign absolute file hosts rejected ---------------------
+# -- foreign absolute file hosts rejected ---------------------
 
 
 @pytest.mark.asyncio
@@ -310,7 +307,7 @@ async def test_download_failure_is_logged_not_raised(tmp_path, monkeypatch):
         app_._clipboard.stop()
 
 
-# -- plan §2.11: folder zip runs off the loop --------------------------------------
+# -- folder zip runs off the loop --------------------------------------
 
 
 @pytest.mark.asyncio

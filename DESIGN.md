@@ -190,7 +190,7 @@ Esc       Close
 Ctrl/Cmd+K Search
 ```
 
-A future quick clipboard overlay should follow:
+The quick clipboard overlay (`Ctrl+Shift+V`) follows:
 
 ```text
 Global Shortcut

@@ -1,8 +1,8 @@
 """Device trust store and PIN pairing for the local sync server.
 
-New devices must enter a pairing PIN once. On success the device ID is
-persisted and remembered, so reconnecting (e.g. re-scanning the QR code)
-requires no PIN. State is stored in a JSON file so it survives restarts.
+A new device pairs once with the pairing code (typed or scanned from the QR)
+and receives a random token, stored here only as a hash. Reconnecting needs no
+code. State is a JSON file so it survives restarts.
 """
 
 from __future__ import annotations
@@ -37,12 +37,11 @@ def _default_path() -> Path:
 
 
 class TrustStore:
-    """Thread-safe store of trusted device IDs, pairing PIN and security settings."""
+    """Thread-safe store of paired-device tokens, the pairing PIN and security settings."""
 
     def __init__(self, path: Path | str | None = None) -> None:
         self._path = Path(path) if path else _default_path()
         self._lock = threading.Lock()
-        self._trusted: set[str] = set()
         self._devices: dict[str, dict[str, Any]] = {}
         self._fails: dict[str, list[float]] = defaultdict(list)
         self._require_pin = True
@@ -56,8 +55,6 @@ class TrustStore:
     def _load(self) -> None:
         try:
             data = json.loads(self._path.read_text(encoding="utf-8"))
-            trusted = data.get("trusted_devices", [])
-            self._trusted = {str(d) for d in trusted if isinstance(d, str)}
             devices = data.get("devices", {})
             if isinstance(devices, dict):
                 self._devices = {
@@ -74,7 +71,6 @@ class TrustStore:
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             payload: dict[str, Any] = {
-                "trusted_devices": sorted(self._trusted),
                 "devices": self._devices,
                 "require_pin": self._require_pin,
                 "pairing_pin": self._pin,
@@ -176,25 +172,6 @@ class TrustStore:
         with self._lock:
             self._require_pin = bool(value)
         self._save()
-
-    # -- trusted devices ---------------------------------------------------
-    def is_trusted(self, device_id: str) -> bool:
-        with self._lock:
-            return device_id in self._trusted
-
-    def trust(self, device_id: str) -> None:
-        with self._lock:
-            self._trusted.add(device_id)
-        self._save()
-
-    def untrust(self, device_id: str) -> None:
-        with self._lock:
-            self._trusted.discard(device_id)
-        self._save()
-
-    def trusted_devices(self) -> list[str]:
-        with self._lock:
-            return sorted(self._trusted)
 
 
 _store: TrustStore | None = None

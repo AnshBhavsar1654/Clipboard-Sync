@@ -1,4 +1,4 @@
-"""LAN networking helpers (plan §2.12): IP selection, free-port probe,
+"""LAN networking helpers: IP selection, free-port probe,
 single-instance guard. No new dependencies (stdlib only)."""
 
 from __future__ import annotations
@@ -7,13 +7,6 @@ import logging
 import socket
 
 logger = logging.getLogger(__name__)
-
-_VIRTUAL_HINTS = (
-    "vethernet", "wsl", "vmware", "virtualbox", "tailscale", "hamachi",
-    "zerotier", "vpn", "docker", "hyper-v", "loopback", "teredo", "isatap",
-    "bluetooth", "vbox",
-)
-
 
 def _is_private_ipv4(ip: str) -> bool:
     parts = ip.split(".")
@@ -59,12 +52,6 @@ def lan_ips() -> list[str]:
                 candidates.append(ip)
     except Exception as exc:
         logger.debug("LAN enumeration failed: %s", exc)
-    try:
-        names = " ".join(n for _, n in socket.if_nameindex()).lower()
-        if any(h in names for h in _VIRTUAL_HINTS):
-            logger.debug("Virtual adapters present; keeping physical-range IPs first.")
-    except Exception:
-        pass
     candidates.sort(key=lambda ip: (not _is_private_ipv4(ip), ip))
     if route in candidates:
         candidates.remove(route)
@@ -73,7 +60,7 @@ def lan_ips() -> list[str]:
 
 
 def primary_lan_ip() -> str:
-    """Best guess for the address phones should open (plan §2.12)."""
+    """Best guess for the address phones should open."""
     ips = lan_ips()
     if ips:
         return ips[0]
@@ -84,7 +71,7 @@ def primary_lan_ip() -> str:
 
 
 def find_open_port(start: int = 8000, count: int = 11) -> int:
-    """First bindable TCP port in [start, start+count) (plan §2.12).
+    """First bindable TCP port in [start, start+count).
 
     The old code died with sys.exit(1) inside a worker thread when 8000 was
     busy and the UI just stopped; now we roll to the next free port.
@@ -105,7 +92,7 @@ _instance_mutex = None
 
 
 def ensure_single_instance(name: str = "ClipBoardSyncSingleton") -> bool:
-    """True if this is the only running copy (plan §2.12).
+    """True if this is the only running copy.
 
     Windows: a Global named mutex. Anywhere else: always True (no enforcement).
     The handle is kept for the process lifetime on purpose.

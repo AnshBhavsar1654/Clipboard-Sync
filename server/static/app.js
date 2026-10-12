@@ -78,7 +78,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 isConnecting = false;
                 reconnectDelay = 1000;
                 updateConnectionStatus("connecting");
-                // Toast only on first connect or after a real outage (plan §3.3).
+                // Toast only on first connect or after a real outage.
                 if (!everConnected) {
                     everConnected = true;
                     showToast("Connected — ready to share", "success");
@@ -86,7 +86,6 @@ document.addEventListener("DOMContentLoaded", () => {
                     hadOutage = false;
                     showToast("Back online — ready to share", "success");
                 }
-                ws.send(JSON.stringify({ type: "auth_request", device_id: deviceId }));
                 sendHello();
                 startHeartbeat();
             };
@@ -139,7 +138,7 @@ document.addEventListener("DOMContentLoaded", () => {
         reconnectDelay = Math.min(reconnectDelay * 1.5, maxReconnectDelay);
     }
 
-    // App-level heartbeat so half-open sockets are detected (plan §3.3).
+    // App-level heartbeat so half-open sockets are detected.
     function startHeartbeat() {
         stopHeartbeat();
         heartbeatTimer = setInterval(() => {
@@ -156,7 +155,7 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     }
 
-    // Mobile browsers freeze background tabs (plan §3.3): reconnect fast
+    // Mobile browsers freeze background tabs: reconnect fast
     // when the page is visible again or the network returns.
     document.addEventListener("visibilitychange", () => {
         if (document.visibilityState === "visible" && (!ws || ws.readyState !== WebSocket.OPEN)) {
@@ -187,25 +186,10 @@ document.addEventListener("DOMContentLoaded", () => {
     // Message Processing
     function handleIncomingMessage(msg) {
         if (msg.type === "pong") return; // heartbeat reply
+        if (msg.type === "paused") { showToast("Sharing is paused on the computer", "error"); return; }
         if (msg.type === "auth_required") {
             showAuthScreen();
             updateConnectionStatus("connecting");
-            return;
-        }
-        if (msg.type === "auth_error") {
-            updateConnectionStatus("connecting");
-            showPinError(msg.message || "That code did not match. Try again.");
-            return;
-        }
-        if (msg.type === "auth_success") {
-            hideAuthScreen();
-            updateConnectionStatus("connected");
-            if (ws && ws._sendHello) ws._sendHello();
-            if (Array.isArray(msg.items)) {
-                feedItems = msg.items.slice().reverse(); // newest first
-                itemCounter.textContent = `${feedItems.length} ${feedItems.length === 1 ? "item" : "items"}`;
-                applyFilter();
-            }
             return;
         }
         if (msg.type === "history" && Array.isArray(msg.items)) {
@@ -216,7 +200,7 @@ document.addEventListener("DOMContentLoaded", () => {
             itemCounter.textContent = `${feedItems.length} ${feedItems.length === 1 ? "item" : "items"}`;
             applyFilter();
         } else if ((msg.type === "text" || msg.type === "image" || msg.type === "file" || msg.type === "folder") && (msg.content || msg.file_url)) {
-            // Reconcile optimistic cards by client_id instead of duplicating (plan §3.6).
+            // Reconcile optimistic cards by client_id instead of duplicating.
             if (msg.client_id) {
                 const idx = feedItems.findIndex(i => i && i.client_id === msg.client_id);
                 if (idx !== -1) {
@@ -290,7 +274,7 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     }
 
-    // Folder shares without loading everything into RAM (plan §3.5): files
+    // Folder shares without loading everything into RAM: files
     // stream one by one (Blobs are zero-copy) and the SERVER assembles the
     // zip from disk once /api/folder/commit arrives.
     async function uploadStagedFiles(entries, displayName) {
@@ -667,7 +651,7 @@ document.addEventListener("DOMContentLoaded", () => {
         document.body.removeChild(temp);
     }
 
-    // Per-item actions: delete/pin everywhere, copy link (plan §3.6).
+    // Per-item actions: delete/pin everywhere, copy link.
     async function handleItemAction(act, item) {
         try {
             if (act === "link") {
@@ -826,7 +810,6 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // Pair over HTTP: trade the code for a server-issued cookie, then open
     // the socket (the cookie authenticates REST and the WS handshake).
-    // Falls back to the legacy WS auth_pin message for older servers.
     async function submitPin() {
         const pin = pinInput.value.replace(/\D/g, "").slice(0, 6);
         if (pin.length !== 6) {
@@ -854,17 +837,13 @@ document.addEventListener("DOMContentLoaded", () => {
             }
             showPinError("That code did not match. Try again.");
         } catch (err) {
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: "auth_pin", device_id: deviceId, pin: pin }));
-            } else {
-                showPinError("Sharing is offline. Trying to reconnect…");
-            }
+            showPinError("Sharing is offline. Try again in a moment.");
         } finally {
             pinSubmit.disabled = false;
         }
     }
 
-    // QR auto-pair (plan §1.3): the code carries ?pair=<code>; consume it
+    // QR auto-pair: the code carries ?pair=<code>; consume it
     // once, then strip it from the address bar.
     function tryAutoPair() {
         try {
@@ -1076,7 +1055,7 @@ document.addEventListener("DOMContentLoaded", () => {
             .replace(/'/g, "&#039;");
     }
 
-    // Allowlist for URLs rendered into src=/href= (plan §1.7). Only links
+    // Allowlist for URLs rendered into src=/href=. Only links
     // this server handed out (/api/files/<id>, same origin) and small image
     // data-URIs may reach the DOM — never javascript:, remote hosts, or
     // attribute-breaking strings from another device.
@@ -1126,7 +1105,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     // Browsers outside secure contexts (plain http://LAN) cannot use the
-    // async clipboard API: don't promise one-tap Paste (plan §3.2).
+    // async clipboard API: don't promise one-tap Paste.
     if (!window.isSecureContext) {
         pasteAndSendBtn.style.display = "none";
         sendInput.placeholder = "Tap here, then use Paste…";
@@ -1144,7 +1123,7 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     });
 
-    // Show the connected computer's name in the header (plan §3.6).
+    // Show the connected computer's name in the header.
     async function refreshHeaderName(connected) {
         const sub = document.getElementById("header-subtitle");
         if (!sub) return;

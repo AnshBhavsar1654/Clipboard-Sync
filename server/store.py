@@ -1,4 +1,4 @@
-"""Persistent history + shared-file lifecycle (plan §2.9).
+"""Persistent history + shared-file lifecycle.
 
 History survives restarts in SQLite (stdlib): clips table with a ``pinned``
 column (pins are flags, not snapshots). Uploads live in the shared dir; the
@@ -149,7 +149,7 @@ def sweep_uploads(uploads_dir: Path, keep_ids: set[str]) -> int:
     """Delete unreferenced shared files + stale *.part leftovers.
 
     Returns the number of files removed. Pinned files are kept by the caller
-    passing their ids in ``keep_ids`` (plan §2.9).
+    passing their ids in ``keep_ids``.
     """
     removed = 0
     try:
@@ -183,7 +183,7 @@ STAGING_MAX_AGE_SECONDS = 3600
 
 
 def sweep_staging(uploads_dir: Path) -> int:
-    """Remove abandoned folder-assembly staging dirs (plan §3.5)."""
+    """Remove abandoned folder-assembly staging dirs."""
     staging = uploads_dir / ".staging"
     try:
         entries = list(staging.iterdir())

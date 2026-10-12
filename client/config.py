@@ -16,18 +16,18 @@ DEFAULT_RECONNECT_BASE_DELAY = 1.0
 DEFAULT_RECONNECT_MAX_DELAY = 60.0
 DEFAULT_CONFIG_DIR = Path.home() / ".clipboardsync"
 
-AUTO_RECEIVE_MAX_BYTES = 50 * 1024 * 1024  # default auto-download cap (plan §2.7)
+AUTO_RECEIVE_MAX_BYTES = 50 * 1024 * 1024  # default auto-download cap
 
 
 @dataclass
 class ReceivePrefs:
-    """How incoming shares land on this computer (plan §2.7). Stored in
+    """How incoming shares land on this computer. Stored in
     ``prefs.json`` next to the device id; missing keys fall back to defaults."""
 
     receive_folder: str = ""  # "" = ~/Downloads/ClipBoardSync
     auto_receive_max_bytes: int = AUTO_RECEIVE_MAX_BYTES
     put_received_on_clipboard: bool = True
-    share_private_clips: bool = False  # plan §2.6: skip do-not-record clips
+    share_private_clips: bool = False  # skip do-not-record clips
     extra_blocked_apps: list[str] | None = None
 
 

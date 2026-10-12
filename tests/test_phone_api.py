@@ -1,4 +1,4 @@
-"""Phase 3: server-assembled folders (§3.5), item endpoints, silence sweep."""
+"""Phone-facing API: folder uploads, per-clip endpoints, heartbeat and silent-socket sweep."""
 
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ def open_hub(tmp_path, monkeypatch):
     hub._connections.clear()
     hub._history.clear()
     hub._auth.clear()
-    hub._auth_failures.clear()
     hub._hosts.clear()
     hub._devices.clear()
     hub._last_seen.clear()
@@ -31,7 +30,6 @@ def open_hub(tmp_path, monkeypatch):
     hub._connections.clear()
     hub._history.clear()
     hub._auth.clear()
-    hub._auth_failures.clear()
     hub._hosts.clear()
     hub._devices.clear()
     hub._last_seen.clear()
@@ -137,9 +135,9 @@ def test_pin_endpoint_roundtrip(open_hub, client):
         ws.send_json({"device_id": "d", "type": "text", "content": "pinnable"})
     clip_id = client.get("/api/history").json()["items"][-1]["id"]
     assert client.post(f"/api/history/{clip_id}/pin", json={"pinned": True}).json() == {"ok": True}
-    assert hub.is_pinned(clip_id)
+    assert clip_id in hub._pinned
     assert client.post(f"/api/history/{clip_id}/pin", json={"pinned": False}).json() == {"ok": True}
-    assert not hub.is_pinned(clip_id)
+    assert clip_id not in hub._pinned
 
 
 def test_client_id_echoed_not_stored(open_hub, client):

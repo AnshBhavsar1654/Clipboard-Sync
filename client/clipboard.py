@@ -1,15 +1,14 @@
 """Windows clipboard monitoring and manipulation via native Win32 APIs.
 
-Phase 0.2: Win32 access lives in :mod:`client.clipboard_backend` behind the
+Win32 access lives in :mod:`client.clipboard_backend` behind the
 ``ClipboardBackend`` interface. This monitor keeps its public API but
-delegates reads/writes to the backend so tests can inject ``FakeClipboard``.
+delegates reads/writes to the backend so tests can inject ``FakeClipboardBackend``.
 Win32 GUI imports are lazy so this module imports on Linux CI.
 """
 
 from __future__ import annotations
 
 import asyncio
-import base64
 import logging
 import threading
 import time
@@ -20,7 +19,6 @@ from typing import Any
 
 from client.clipboard_backend import (
     ClipboardBackend,
-    FakeClipboardBackend,
     default_backend,
     fingerprint_payload,
 )
@@ -28,9 +26,6 @@ from client.clipboard_backend import (
 logger = logging.getLogger(__name__)
 
 ClipboardChangeHandler = Callable[[str | dict[str, Any]], Awaitable[None] | None]
-
-# Back-compat alias used by tests / external code.
-FakeClipboard = FakeClipboardBackend
 
 _WINDOW_CLASS = "ClipBoardSyncHiddenListener"
 WM_CLIPBOARDUPDATE = 0x031D
@@ -95,7 +90,7 @@ class ClipboardMonitor:
         self._hwnd: int | None = None
         self._stop_event = threading.Event()
         # Reads run here (max 1 at a time) so the Win32 pump never blocks
-        # and bursts of updates coalesce via the debounce below (plan §2.5).
+        # and bursts of updates coalesce via the debounce below.
         self._reader = ThreadPoolExecutor(max_workers=1, thread_name_prefix="clipboard-read")
         self._reader_shutdown = False
         self._last_notify = 0.0
@@ -139,7 +134,7 @@ class ClipboardMonitor:
         logger.info("Clipboard monitor stopped")
 
     def _note_own_write(self, payload: dict[str, Any] | None = None) -> None:
-        """Record a programmatic write for echo suppression (plan §2.4).
+        """Record a programmatic write for echo suppression.
 
         The flag is set before the write (cheap, synchronous); the clipboard
         sequence number is captured after, so the two notifications raised by
@@ -175,7 +170,7 @@ class ClipboardMonitor:
         """
         Write text to the local clipboard without triggering an outbound sync.
 
-        Echo suppression is by clipboard sequence number (plan §2.4), with the
+        Echo suppression is by clipboard sequence number, with the
         one-shot flag as a fallback when the backend has no sequence number.
         """
         with self._state_lock:
@@ -186,21 +181,8 @@ class ClipboardMonitor:
 
         logger.debug("Local clipboard updated programmatically (%d chars)", len(text))
 
-    def set_image_from_base64(self, b64_data_uri: str) -> None:
-        """Write base64-encoded image data to clipboard in CF_DIB format."""
-        try:
-            if "," in b64_data_uri:
-                b64_str = b64_data_uri.split(",", 1)[1]
-            else:
-                b64_str = b64_data_uri
-
-            raw_bytes = base64.b64decode(b64_str)
-            self.set_image_from_bytes(raw_bytes)
-        except Exception as exc:
-            logger.warning("Failed to write image to clipboard: %s", exc)
-
     def set_image_from_bytes(self, raw_bytes: bytes) -> None:
-        """Write decoded image bytes to the clipboard (plan §2.7)."""
+        """Write decoded image bytes to the clipboard."""
         with self._state_lock:
             self._suppress_next_change = True
 
@@ -210,33 +192,18 @@ class ClipboardMonitor:
         logger.info("Set image (%d bytes) to clipboard programmatically", len(raw_bytes))
 
     def set_files(self, paths: list[Path]) -> None:
-        """Put files on the clipboard as CF_HDROP (Phase 2.7 helper, via backend)."""
+        """Put files on the clipboard as CF_HDROP."""
         with self._state_lock:
             self._suppress_next_change = True
         self._backend.write_files(list(paths))
         self._note_own_write()
 
-    def get_clipboard_payload(self=None) -> dict[str, Any] | None:  # type: ignore[no-untyped-def]
-        """Inspect system clipboard for text, images, files, or folders.
-
-        Works both as ``monitor.get_clipboard_payload()`` (uses its backend)
-        and as ``ClipboardMonitor.get_clipboard_payload()`` (default backend).
-        """
+    def get_clipboard_payload(self) -> dict[str, Any] | None:
+        """Inspect the system clipboard for text, images, files, or folders."""
         try:
-            if isinstance(self, ClipboardMonitor):
-                return self._backend.read_payload(skip_private=self._skip_private)
-            return default_backend().read_payload()
+            return self._backend.read_payload(skip_private=self._skip_private)
         except Exception as exc:
             logger.debug("Backend read_payload failed: %s", exc)
-            return None
-
-    @staticmethod
-    def get_text() -> str | None:
-        """Read Unicode text from the clipboard, or None if unavailable."""
-        try:
-            return default_backend().read_text()
-        except Exception:
-            logger.debug("Clipboard read failed", exc_info=True)
             return None
 
     @staticmethod
@@ -341,7 +308,7 @@ class ClipboardMonitor:
 
     def _notify_clipboard_changed(self) -> None:
         """Called on the Win32 pump thread: hand the read to the worker so the
-        pump never blocks and bursts coalesce via debounce (plan §2.5)."""
+        pump never blocks and bursts coalesce via debounce."""
         self._last_notify = time.monotonic()
         if self._stop_event.is_set() or self._reader_shutdown:
             return
@@ -368,12 +335,12 @@ class ClipboardMonitor:
             logger.debug("Ignored programmatic clipboard update")
             return
 
-        payload = self.get_clipboard_payload()  # type: ignore[call-arg]
+        payload = self.get_clipboard_payload()
         if payload is None:
             logger.debug("Clipboard changed but contains unsupported content")
             return
 
-        # Full-content hash dedupe (plan §2.3): two different long clips that
+        # Full-content hash dedupe: two different long clips that
         # share a prefix must both sync.
         fingerprint = fingerprint_payload(payload)
         with self._state_lock:

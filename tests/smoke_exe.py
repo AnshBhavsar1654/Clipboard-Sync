@@ -1,4 +1,4 @@
-"""Built-exe smoke test (plan §5.2): launch the packaged app headless, pair,
+"""Built-exe smoke test: launch the packaged app headless, pair,
 upload a file, download it back byte-identical, sync a clip over the socket.
 
 Run:  python build_exe.py --target headless

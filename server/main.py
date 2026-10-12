@@ -8,9 +8,9 @@ import logging
 import os
 import re
 import shutil
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
-import sys
 from typing import Any
 from urllib.parse import urlparse
 
@@ -45,7 +45,7 @@ def is_loopback(request: Request) -> bool:
 
 
 async def require_device(request: Request) -> None:
-    """HTTP pairing gate (plan §1.2): everything exposing clip data needs a
+    """HTTP pairing gate: everything exposing clip data needs a
     paired device, except loopback (the desktop app itself) and open mode."""
     store = hub._trust
     if is_loopback(request) or not store.require_pin:
@@ -56,7 +56,7 @@ async def require_device(request: Request) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Background hygiene (plan §2.9/§3.3): silent-socket sweep every 30 s,
+    """Background hygiene: silent-socket sweep every 30 s,
     orphaned-file sweep every 10 min."""
     if hub.uploads_dir is None:
         hub.uploads_dir = UPLOADS_DIR
@@ -102,7 +102,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# No CORS middleware: the phone page is same-origin and needs none (plan §1.4).
+# No CORS middleware: the phone page is same-origin and needs none.
 # A wildcard CORS policy with credentials would let any website read this
 # PC's clips via loopback; unsafe cross-site writes are rejected below.
 
@@ -111,9 +111,67 @@ hub = SyncHub(max_history=25)
 app.include_router(admin_router)
 
 
+def _host_allowed(host_header: str) -> bool:
+    """Accept IP literals, localhost, *.local and this machine's name.
+
+    A DNS-rebinding page reaches 127.0.0.1 under *its own* domain name, so a
+    loopback request with any other hostname is not our window or our phone.
+    """
+    import ipaddress
+    import socket
+
+    host = host_header.strip().lower()
+    if host.startswith("["):  # [::1]:8000
+        host = host[1:].split("]", 1)[0]
+    elif host.count(":") == 1:
+        host = host.split(":", 1)[0]
+    if not host:
+        return False
+    if host == "localhost" or host.endswith(".local"):
+        return True
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        pass
+    try:
+        return host == socket.gethostname().lower()
+    except OSError:
+        return False
+
+
+class RebindingGuard:
+    """ASGI guard (HTTP + WebSocket): loopback callers must use a local Host."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] in ("http", "websocket"):
+            client = scope.get("client") or ("", 0)
+            if is_loopback_host(client[0]):
+                headers = dict(scope.get("headers") or [])
+                host = headers.get(b"host", b"").decode("latin-1")
+                if not _host_allowed(host):
+                    if scope["type"] == "websocket":
+                        await receive()
+                        await send({"type": "websocket.close", "code": 1008})
+                    else:
+                        body = b'{"detail":"Unexpected host name."}'
+                        await send({"type": "http.response.start", "status": 403, "headers": [
+                            (b"content-type", b"application/json"),
+                            (b"content-length", str(len(body)).encode())]})
+                        await send({"type": "http.response.body", "body": body})
+                    return
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(RebindingGuard)
+
+
 @app.middleware("http")
 async def reject_cross_site(request: Request, call_next):
-    """Block cross-site writes (CSRF / DNS-rebinding vs 127.0.0.1, plan §1.4)."""
+    """Block cross-site writes (CSRF / DNS-rebinding vs 127.0.0.1)."""
     origin = request.headers.get("origin")
     if origin and request.method not in ("GET", "HEAD", "OPTIONS"):
         if urlparse(origin).netloc != request.headers.get("host", ""):
@@ -151,7 +209,7 @@ def _shared_dir() -> Path:
 
 
 # Shared files live OUTSIDE the static mount so /uploads/<name> is never
-# served without auth; downloads go through /api/files/{id} (plan §1.5).
+# served without auth; downloads go through /api/files/{id}.
 UPLOADS_DIR = _shared_dir()
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -164,7 +222,7 @@ async def get_recent_history() -> dict[str, Any]:
 
 @app.get("/api/devices", dependencies=[Depends(require_device)])
 async def get_devices() -> dict[str, Any]:
-    """Connected devices with names (plan §2.10)."""
+    """Connected devices with names."""
     devices = hub.devices()
     return {"devices": devices, "connection_count": len(devices)}
 
@@ -177,7 +235,7 @@ async def get_health() -> dict[str, Any]:
 
 @app.get("/api/info")
 async def get_info() -> dict[str, Any]:
-    """Public computer info for the phone header (plan §3.6)."""
+    """Public computer info for the phone header."""
     import socket as _socket
 
     try:
@@ -189,7 +247,7 @@ async def get_info() -> dict[str, Any]:
 
 @app.delete("/api/history/{clip_id}", dependencies=[Depends(require_device)])
 async def delete_clip(clip_id: str) -> dict[str, Any]:
-    """Delete one clip everywhere, including its file (plan §2.9/§3.6)."""
+    """Delete one clip everywhere, including its file."""
     if not await hub.remove_item(clip_id):
         raise HTTPException(status_code=404, detail="Clip not found.")
     return {"ok": True}
@@ -197,14 +255,14 @@ async def delete_clip(clip_id: str) -> dict[str, Any]:
 
 @app.delete("/api/history", dependencies=[Depends(require_device)])
 async def clear_history() -> dict[str, Any]:
-    """Really delete history; pinned files are exempt (plan §2.9)."""
+    """Really delete history; pinned files are exempt."""
     await hub.clear_history()
     return {"ok": True}
 
 
 @app.post("/api/history/{clip_id}/pin", dependencies=[Depends(require_device)])
 async def pin_clip(clip_id: str, body: dict) -> dict[str, Any]:
-    """Pin/unpin a clip: {"pinned": true/false} (plan §2.9)."""
+    """Pin/unpin a clip: {"pinned": true/false}."""
     await hub.set_pinned(clip_id, bool(body.get("pinned", True)))
     return {"ok": True}
 
@@ -212,7 +270,7 @@ async def pin_clip(clip_id: str, body: dict) -> dict[str, Any]:
 @app.post("/api/pair")
 async def pair_device(request: Request, response: Response, body: dict) -> dict[str, Any]:
     """Pair a phone over HTTP: trade the single-use pairing code for a
-    server-issued device token stored in an HttpOnly cookie (plan §1.2)."""
+    server-issued device token stored in an HttpOnly cookie."""
     store, ip = hub._trust, client_ip(request)
     if store.locked_out(ip):
         raise HTTPException(
@@ -243,7 +301,7 @@ def _staging_dir(folder_id: str) -> Path:
 async def _stream_upload(file: UploadFile, dest: Path) -> int:
     """Stream an upload to ``dest`` via ``.part`` (never fully in RAM).
 
-    Returns bytes written. Aborts leave no ``.part`` behind (plan §2.14).
+    Returns bytes written. Aborts leave no ``.part`` behind.
     """
     tmp_path = dest.with_suffix(dest.suffix + ".part")
     total = 0
@@ -289,11 +347,11 @@ async def upload_file_endpoint(
     """Stream an upload to disk (never fully in RAM) and return a fast download link.
 
     With ``folder_id`` + ``relpath`` the file is staged for a later
-    ``POST /api/folder/commit`` instead (plan §3.5: constant phone memory).
+    ``POST /api/folder/commit`` instead.
     """
     import uuid
 
-    # Early reject from Content-Length before reading anything (plan §2.14).
+    # Early reject from Content-Length before reading anything.
     try:
         claimed = int(request.headers.get("content-length") or 0)
     except ValueError:
@@ -332,7 +390,7 @@ async def upload_file_endpoint(
         payload["entry_count"] = entry_count
     if skipped_count is not None:
         payload["skipped_count"] = skipped_count
-    # Instant list rendering for every sender (plan §2.2): small images get a
+    # Instant list rendering for every sender: small images get a
     # ≤24 KB thumb; full bytes stay behind /api/files/{id}.
     if resolved_type == "image" and 0 < total <= 25 * 1024 * 1024:
         try:
@@ -347,7 +405,7 @@ async def upload_file_endpoint(
 
 
 async def _stage_file(file: UploadFile, folder_id: str, relpath: str | None) -> dict[str, Any]:
-    """Stage one folder member for a later commit (plan §3.5)."""
+    """Stage one folder member for a later commit."""
     if not _FOLDER_ID_RE.fullmatch(folder_id or ""):
         raise HTTPException(status_code=400, detail="Bad folder share. Start over.")
     parts = [
@@ -370,7 +428,7 @@ async def _stage_file(file: UploadFile, folder_id: str, relpath: str | None) -> 
 
 @app.post("/api/folder/commit", dependencies=[Depends(require_device)])
 async def commit_folder(body: dict) -> dict[str, Any]:
-    """Assemble staged files into one zip, server-side (plan §3.5)."""
+    """Assemble staged files into one zip, server-side."""
     import uuid
     import zipfile
 
@@ -416,7 +474,6 @@ async def download_file_endpoint(name: str, request: Request):
         return JSONResponse(status_code=404, content={"detail": "File not found."})
     path = UPLOADS_DIR / safe
     if not path.is_file():
-        # Back-compat: old /uploads/ links created before this endpoint
         return JSONResponse(status_code=404, content={"detail": "File not found."})
     size = path.stat().st_size
     range_header = request.headers.get("range") if size else None

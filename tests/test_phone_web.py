@@ -1,4 +1,4 @@
-"""Phone page end-to-end (plan §5.3): pair, send text, upload a file.
+"""Phone page end-to-end: pair, send text, upload a file.
 
 Needs `pip install playwright && playwright install chromium`.
 Skipped when Playwright is unavailable. Run:

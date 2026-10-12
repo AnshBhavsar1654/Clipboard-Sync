@@ -1,6 +1,6 @@
-"""Package ClipBoardSync into a standalone Windows executable (plan §5.1).
+"""Package ClipBoardSync into a standalone Windows executable.
 
-Default: --onedir GUI build wrapped by installer.iss (fast start, fewer AV
+Default: --onedir desktop-app build (run_desktop.py) wrapped by installer.iss (fast start, fewer AV
 false positives). Variants:
   python build_exe.py --mode onefile --target gui       # portable single exe
   python build_exe.py --target headless                 # console server+client
@@ -71,7 +71,7 @@ def build(mode: str, target: str) -> int:
     icon_arg = f"--icon={icon_file}" if icon_file else "--icon="
     asset_arg = f"--add-data=assets{sep}assets"
 
-    entry = "run_gui.py" if target == "gui" else "run_app.py"
+    entry = "run_desktop.py" if target == "gui" else "run_app.py"
     name = "ClipBoardSync" if target == "gui" else "ClipBoardSyncHeadless"
 
     # Build command arguments
@@ -83,12 +83,22 @@ def build(mode: str, target: str) -> int:
     ]
     if target == "gui":
         pyinstaller_args += ["--windowed", "--noconsole"]
+    if target == "gui":
+        # The window is Edge WebView2 via pywebview/pythonnet; PyInstaller
+        # cannot see its runtime DLLs, JS shim and CLR loader on its own.
+        pyinstaller_args += [
+            "--collect-all", "webview",
+            "--collect-all", "pythonnet",
+            "--collect-all", "clr_loader",
+            "--hidden-import=clr",
+            "--hidden-import=proxy_tools",
+            "--hidden-import=bottle",
+        ]
     pyinstaller_args += [
         "--onedir" if mode == "onedir" else "--onefile",
         f"--add-data=server/static{sep}server/static",
         asset_arg,
         icon_arg,
-        "--collect-data", "customtkinter",
         "--hidden-import=uvicorn.logging",
         "--hidden-import=uvicorn.loops.auto",
         "--hidden-import=uvicorn.protocols.http.auto",
@@ -96,7 +106,6 @@ def build(mode: str, target: str) -> int:
         "--hidden-import=uvicorn.lifespan.on",
         "--hidden-import=websockets",
         "--hidden-import=websockets.asyncio.client",
-        "--hidden-import=webview.platforms.edgechromium",
         "--hidden-import=pystray._win32",
         "--hidden-import=win32clipboard",
         "--hidden-import=win32con",

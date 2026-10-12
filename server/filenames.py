@@ -1,4 +1,4 @@
-"""Shared filename sanitizing (plan §1.8, §2.14).
+"""Shared filename sanitizing.
 
 One helper for every download path: the server upload endpoint, the desktop
 client download, and the GUI peer download. Remote-supplied names must never

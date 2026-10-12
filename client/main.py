@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import logging
 import signal
 import sys
+import time
+from datetime import datetime
 from typing import Any
 
 from client.clipboard import ClipboardMonitor
@@ -30,6 +31,9 @@ class ClipBoardSyncApp:
         self._loop = asyncio.get_running_loop()
         self._shutdown_event = asyncio.Event()
         self._prefs = load_prefs(config.config_dir)
+        # Only clips newer than this are applied from a history frame, so a
+        # restart never re-downloads or re-pastes what is already stored.
+        self._history_floor = time.time()
 
         self._clipboard = ClipboardMonitor(
             loop=self._loop,
@@ -76,7 +80,7 @@ class ClipBoardSyncApp:
         """Resolve a hub file_url to a download URL, or None to skip it.
 
         Absolute URLs are only honored when they point at the sync server we
-        are connected to (plan §1.6) — a paired device must not redirect the
+        are connected to — a paired device must not redirect the
         desktop into downloading from an arbitrary host.
         """
         from urllib.parse import urlparse
@@ -180,7 +184,7 @@ class ClipBoardSyncApp:
             return None
 
     async def _share_image_bytes(self, data: bytes, filename: str) -> bool:
-        """Share clipboard image bytes as metadata (plan §2.2): the socket
+        """Share clipboard image bytes as metadata: the socket
         carries file_url + thumb only, never the pixels."""
         payload = await self._upload_bytes(data, filename, "image")
         if not payload:
@@ -248,10 +252,11 @@ class ClipBoardSyncApp:
 
         if p_type == "folder" and filepath:
             # Zip the folder off the event loop (zipping blocks sharing while
-            # it runs — plan §2.11), then stream-upload the zip
+            # it runs), then stream-upload the zip
             try:
-                from server.folder_zip import zip_directory
                 from pathlib import Path
+
+                from server.folder_zip import zip_directory
                 zip_path, zip_name, entries, skipped = await asyncio.to_thread(
                     zip_directory, filepath
                 )
@@ -261,7 +266,7 @@ class ClipBoardSyncApp:
                         logger.warning("Folder '%s' too big to share (%d bytes).", zip_name, size)
                         print(f"Folder '{Path(filepath).name}' is too big to share (over 1 GB zipped).")
                         return
-                    ok = await self._upload_path(
+                    await self._upload_path(
                         str(zip_path), zip_name, "folder",
                         entry_count=entries, skipped_count=skipped,
                     )
@@ -286,12 +291,13 @@ class ClipBoardSyncApp:
                 logger.warning("Failed to upload local file clip: %s", exc)
 
         if p_type == "image" and payload.get("image_bytes"):
-            # Screenshots share metadata only; bytes go via /api/upload (plan §2.2).
+            # Screenshots share metadata only; bytes go via /api/upload.
             import time as _time
             name = filename or f"screenshot_{_time.strftime('%Y%m%d_%H%M%S')}.png"
             if await self._share_image_bytes(bytes(payload["image_bytes"]), name):
                 return
-            # Upload failed: fall through to the legacy inline path below.
+            logger.warning("Could not upload the clipboard image; not shared.")
+            return
 
         await self._websocket.send_clipboard_update(
             content=content,
@@ -304,7 +310,7 @@ class ClipBoardSyncApp:
         )
 
     async def _apply_remote_item(self, message: dict[str, Any]) -> None:
-        """Land one incoming clip on this computer (plan §2.7): images onto
+        """Land one incoming clip on this computer: images onto
         the clipboard as pixels, files/folders onto the clipboard as CF_HDROP
         so Explorer Ctrl+V pastes them — the Ctrl+V promise."""
         source_device = message.get("device_id")
@@ -322,18 +328,6 @@ class ClipBoardSyncApp:
                 print(f"'{message.get('filename')}' is too big to receive automatically "
                       f"(over {self._prefs.auto_receive_max_bytes // (1024 * 1024)} MB).")
                 return
-
-        if content_type == "image" and isinstance(content, str) and content.startswith("data:image/"):
-            # Legacy inline photo (small, from older senders).
-            logger.info("Applying remote clipboard image update from device %s", source_device)
-            print("New photo shared — copied to your clipboard.")
-            try:
-                self._clipboard.set_image_from_bytes(
-                    base64.b64decode(content.split(",", 1)[1])
-                )
-            except Exception:
-                self._clipboard.set_image_from_base64(content)
-            return
 
         if content_type == "image" and message.get("file_url"):
             logger.info("Applying shared photo from device %s", source_device)
@@ -389,12 +383,21 @@ class ClipBoardSyncApp:
             latest = items[-1]
             if not isinstance(latest, dict):
                 return
+            floor, self._history_floor = self._history_floor, time.time()
             if latest.get("device_id") == self._config.device_id:
                 logger.debug("Latest history item originated from self; skipping")
+                return
+            try:
+                sent_at = datetime.fromisoformat(str(latest.get("timestamp"))).timestamp()
+            except ValueError:
+                return
+            if sent_at <= floor:
+                logger.debug("Latest history item predates this session; skipping")
                 return
             await self._apply_remote_item(latest)
             return
 
+        self._history_floor = time.time()
         await self._apply_remote_item(message)
 
 

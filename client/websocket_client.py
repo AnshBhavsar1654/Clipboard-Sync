@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import websockets
@@ -57,12 +57,12 @@ class WebSocketClient:
     def _connect_kwargs(self) -> dict[str, Any]:
         # max_size=None: screenshots/history frames exceed the websockets
         # 1 MiB default, which dropped the client with code 1009 in a
-        # reconnect loop (plan §2.1). Bytes travel through /api/files anyway.
+        # reconnect loop. Bytes travel through /api/files anyway.
         return {"max_size": None, "ping_interval": 20, "ping_timeout": 20}
 
     async def _heartbeat_loop(self) -> None:
         """App-level ping every 25 s so the server's silent-socket sweep
-        (plan §3.3) never mistakes this computer for a dead phone."""
+        never mistakes this computer for a dead phone."""
         while self._running:
             try:
                 await asyncio.sleep(25)
@@ -76,7 +76,7 @@ class WebSocketClient:
                 pass
 
     async def _send_hello(self, ws: ClientConnection) -> None:
-        """Identify this computer for the hub device list (plan §2.10)."""
+        """Identify this computer for the hub device list."""
         try:
             import socket as _socket
 
@@ -149,7 +149,7 @@ class WebSocketClient:
         """Queue a clipboard update for transmission to the backend."""
         message: dict[str, Any] = {
             "device_id": self._device_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "type": content_type,
             "content": content,
         }

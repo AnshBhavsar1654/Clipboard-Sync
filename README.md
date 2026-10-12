@@ -48,8 +48,8 @@
 ```bash
 uv sync                  # or: pip install -r requirements.txt
 
-python run_desktop.py    # desktop window (search, connect dialog, settings, tray)
-python run_gui.py        # legacy desktop window (kept until the new UI passes acceptance)
+python run_desktop.py    # the desktop app (window, tray, quick paste); `--minimized` starts in the tray
+python run_gui.py        # same thing (kept so old shortcuts keep working)
 python run_app.py        # headless terminal launcher (see --help for --port/--headless)
 ```
 
@@ -84,7 +84,7 @@ python build_exe.py --target headless     # console build for the smoke test
 |-------|------------|
 | Sync engine | FastAPI + Uvicorn, WebSocket (`/ws`), REST history (`/api/history`), upload (`/api/upload`), pairing (`/api/pair`) |
 | Windows client | Native Win32 clipboard hooks (pywin32) wired into asyncio |
-| Desktop GUI | WebView2 window + tray + hotkey (`gui/`), loopback admin API; legacy CustomTkinter in `run_gui.py` |
+| Desktop GUI | WebView2 window + tray + hotkey (`gui/`), loopback admin API |
 | Mobile frontend | Vanilla HTML/CSS/JS (no CDN, no frameworks), native WebSocket + Clipboard APIs |
 
 ### Project structure
@@ -106,8 +106,8 @@ ClipBoardSync/
 │   ├── clipboard_backend.py  # Win32/Fake backends, content hash
 │   └── config.py         # device id + receive prefs (prefs.json)
 ├── assets/               # Application icon
-├── run_desktop.py        # New desktop shell entry point
-├── run_gui.py            # Legacy GUI entry point
+├── run_desktop.py        # Desktop app entry point (what the exe runs)
+├── run_gui.py            # Forwards to run_desktop.py
 ├── run_app.py            # Headless entry point (--port/--headless)
 ├── build_exe.py          # PyInstaller build script
 ├── installer.iss         # Inno Setup installer script
@@ -117,9 +117,9 @@ ClipBoardSync/
 
 Receive preferences live in `~/.clipboardsync/prefs.json`: receive folder, auto-download cap, put-received-on-clipboard, private-clip sharing. App data (history DB, shared files, trust store) lives in `%LOCALAPPDATA%\ClipBoardSync` on Windows.
 
-### Other computers nearby (experimental)
+### Linking two computers
 
-The Devices tab can join another PC's server with its address + code. It works for basic sharing; PC-to-PC is still being hardened — same-Wi-Fi phone sharing is the supported path.
+Open **Connect a device → Another computer** on the second PC. Nearby computers on the same Wi-Fi are listed (or type the address and port), then enter the pairing code shown on the first PC under **Connect a device → Phone**. After that, anything copied on either PC appears on both, along with files, and each PC's phones see everything too. The link is remembered and reconnects on its own; remove it with **Disconnect**, or revoke it from the first PC under Settings → Paired devices.
 
 ### Design
 

@@ -1,6 +1,6 @@
 /* Theme bootstrap: runs before first paint to avoid a flash.
  * Kept in its own file (no inline <script>) so the Content-Security-Policy
- * can stay `script-src 'self'` (plan §1.7). */
+ * can stay `script-src 'self'`. */
 (function () {
     try {
         var t = localStorage.getItem("clipboardsync_theme");

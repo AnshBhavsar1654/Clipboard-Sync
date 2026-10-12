@@ -1,4 +1,4 @@
-"""Loopback-only admin API for the desktop shell (plan §4.1).
+"""Loopback-only admin API for the desktop shell.
 
 The pywebview window talks to these endpoints with a per-launch random token
 (``?t=`` or ``X-Admin-Token``). Non-loopback callers are rejected outright;
@@ -10,7 +10,7 @@ from __future__ import annotations
 import io
 import logging
 import secrets
-import time
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -26,17 +26,38 @@ router = APIRouter(prefix="/api/admin")
 
 _admin_token: str = secrets.token_urlsafe(32)
 _port: int = 8000
-_started_at: float = time.time()
 
 _engine_start = None
 _engine_stop = None
 _engine_running = None
+_on_settings_changed = None
+_get_peer = None
+_get_nearby = None
+_device_id = "This computer"
 
 
 def set_engine_controller(start, stop, is_running) -> None:
     """Shell registers engine control so the drawer can pause/resume sharing."""
     global _engine_start, _engine_stop, _engine_running
     _engine_start, _engine_stop, _engine_running = start, stop, is_running
+
+
+def set_identity(device_id: str) -> None:
+    """This computer's sync identity, so the window can label its own clips."""
+    global _device_id
+    _device_id = device_id or "This computer"
+
+
+def set_settings_listener(callback) -> None:
+    """Called after settings are saved so the running client picks them up."""
+    global _on_settings_changed
+    _on_settings_changed = callback
+
+
+def set_peer_sources(get_peer, get_nearby) -> None:
+    """Shell registers how to reach the computer link and the nearby-computer list."""
+    global _get_peer, _get_nearby
+    _get_peer, _get_nearby = get_peer, get_nearby
 
 
 def admin_token() -> str:
@@ -79,7 +100,9 @@ def _pairing_url() -> str:
 
 @router.get("/state", dependencies=[Depends(require_admin)])
 async def admin_state() -> dict[str, Any]:
-    """Everything the desktop window needs to render (plan §4.1)."""
+    """Everything the desktop window needs to render."""
+    import socket
+
     from client.config import load_prefs
     from server.main import hub
 
@@ -87,8 +110,9 @@ async def admin_state() -> dict[str, Any]:
     store = hub._trust
     return {
         "version": __version__,
-        "running": True,
         "engine_running": bool(_engine_running and _engine_running()),
+        "this_device_id": _device_id,
+        "computer_name": socket.gethostname(),
         "port": _port,
         "pairing_url": _pairing_url(),
         "pairing_pin": store.pairing_pin if store.require_pin else "",
@@ -96,7 +120,8 @@ async def admin_state() -> dict[str, Any]:
         "connection_count": hub.connection_count,
         "devices": hub.devices(),
         "phones": store.phone_tokens(),
-        "trusted_ids": store.trusted_devices(),
+        "peer": link.info() if (link := _get_peer() if _get_peer else None) else None,
+        "nearby": _get_nearby() if _get_nearby else [],
         "history": hub.get_history(),
         "settings": {
             "receive_folder": prefs.receive_folder,
@@ -105,8 +130,31 @@ async def admin_state() -> dict[str, Any]:
             "share_private_clips": prefs.share_private_clips,
             "require_pin": store.require_pin,
         },
-        "uptime_seconds": int(time.time() - _started_at),
     }
+
+
+@router.post("/peer", dependencies=[Depends(require_admin)])
+async def link_computer(body: dict) -> dict[str, Any]:
+    """Join another computer running ClipBoardSync: {host, port, code}."""
+    from client.peer_link import PeerError
+
+    link = _get_peer() if _get_peer else None
+    if link is None:
+        raise HTTPException(status_code=503, detail="Sharing is still starting. Try again in a moment.")
+    try:
+        port = int(body.get("port") or 8000)
+        await link.connect(str(body.get("host", "")), port, str(body.get("code", "")))
+    except (PeerError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc) or "Enter a valid port.") from exc
+    return {"ok": True, "peer": link.info()}
+
+
+@router.delete("/peer", dependencies=[Depends(require_admin)])
+async def unlink_computer() -> dict[str, Any]:
+    link = _get_peer() if _get_peer else None
+    if link is not None:
+        await link.disconnect()
+    return {"ok": True}
 
 
 @router.post("/pairing/new", dependencies=[Depends(require_admin)])
@@ -118,19 +166,18 @@ async def new_pairing_code() -> dict[str, Any]:
 
 @router.delete("/devices/{device_id}", dependencies=[Depends(require_admin)])
 async def remove_device(device_id: str) -> dict[str, Any]:
-    """Unpair a phone by token id (12-hex) or legacy device id."""
+    """Unpair a phone or computer by the id shown in the device list."""
     from server.main import hub
 
     store = hub._trust
-    if store.revoke_token_prefix(device_id):
-        return {"ok": True}
-    store.untrust(device_id)
+    if not store.revoke_token_prefix(device_id):
+        raise HTTPException(status_code=404, detail="Device not found.")
     return {"ok": True}
 
 
 @router.post("/settings", dependencies=[Depends(require_admin)])
 async def update_settings(body: dict) -> dict[str, Any]:
-    """Persist receive/privacy settings (plan §4.2 drawer)."""
+    """Persist receive/privacy settings."""
     from client.config import load_prefs, save_prefs
     from server.main import hub
 
@@ -145,6 +192,11 @@ async def update_settings(body: dict) -> dict[str, Any]:
     save_prefs(hub._trust._path.parent, prefs)
     if isinstance(body.get("require_pin"), bool):
         hub._trust.require_pin = body["require_pin"]
+    if _on_settings_changed is not None:
+        try:
+            _on_settings_changed()
+        except Exception as exc:
+            logger.debug("Settings listener failed: %s", exc)
     return {"ok": True}
 
 
@@ -165,7 +217,7 @@ async def pairing_qr() -> Response:
 
 @router.post("/share", dependencies=[Depends(require_admin)])
 async def share_paths(body: dict) -> dict[str, Any]:
-    """Share local files/folders picked in the shell (plan §4.4 drag-drop).
+    """Share local files/folders picked in the shell.
 
     The shell resolves user picks to absolute paths; the server validates,
     stores, and broadcasts metadata. Loopback + token gate the trust.
@@ -194,12 +246,12 @@ async def share_paths(body: dict) -> dict[str, Any]:
                     if zip_path.stat().st_size > 1024 * 1024 * 1024:
                         continue
                     stored = f"{uuid.uuid4().hex[:10]}.zip"
-                    (UPLOADS_DIR / stored).write_bytes(zip_path.read_bytes())
+                    await asyncio.to_thread(shutil.copyfile, zip_path, UPLOADS_DIR / stored)
                     size = (UPLOADS_DIR / stored).stat().st_size
                 finally:
                     zip_path.unlink(missing_ok=True)
                 item = ClipboardItem(
-                    device_id="This computer", timestamp=get_utc_now_iso(), type="folder",
+                    device_id=_device_id, timestamp=get_utc_now_iso(), type="folder",
                     content=f"Folder: {zip_name} ({entries} items)", filename=zip_name,
                     filesize=size, file_url=f"/api/files/{stored}",
                     entry_count=entries, skipped_count=skipped,
@@ -208,14 +260,19 @@ async def share_paths(body: dict) -> dict[str, Any]:
                 if path.stat().st_size > 2 * 1024 * 1024 * 1024:
                     continue
                 stored = f"{uuid.uuid4().hex[:10]}{path.suffix[:10]}"
-                with open(path, "rb") as src, open(UPLOADS_DIR / stored, "wb") as out:
-                    import shutil as _shutil
+                await asyncio.to_thread(shutil.copyfile, path, UPLOADS_DIR / stored)
+                size = path.stat().st_size
+                kind, thumb = "file", None
+                if path.suffix.lower() in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp") and size <= 25 * 1024 * 1024:
+                    from server.media import make_thumb
 
-                    _shutil.copyfileobj(src, out, length=1024 * 1024)
+                    thumb = await asyncio.to_thread(lambda p=path: make_thumb(p.read_bytes()))
+                    kind = "image" if thumb else "file"
                 item = ClipboardItem(
-                    device_id="This computer", timestamp=get_utc_now_iso(), type="file",
-                    content=f"File: {path.name}", filename=path.name,
-                    filesize=path.stat().st_size, file_url=f"/api/files/{stored}",
+                    device_id=_device_id, timestamp=get_utc_now_iso(), type=kind,
+                    content=f"{'Image' if kind == 'image' else 'File'}: {path.name}",
+                    filename=path.name, filesize=size, file_url=f"/api/files/{stored}",
+                    thumb=thumb,
                 )
             await hub.handle_message(None, item.to_message_dict())
             shared.append({"filename": item.filename, "type": item.type})
@@ -240,7 +297,7 @@ async def engine_control(body: dict) -> dict[str, Any]:
 
 @router.get("/diagnostics", dependencies=[Depends(require_admin)])
 async def diagnostics() -> dict[str, Any]:
-    """Port/firewall/storage self-check backing Test connection (plan §2.12)."""
+    """Port/firewall/storage self-check backing Test connection."""
     from server.main import UPLOADS_DIR, hub
     from server.net import find_open_port, lan_ips
 

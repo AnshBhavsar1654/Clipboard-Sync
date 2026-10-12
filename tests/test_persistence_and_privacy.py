@@ -1,4 +1,4 @@
-"""M2 part 2: persistence (plan §2.9), identity (§2.10), privacy (§2.6), net (§2.12)."""
+"""History persistence, device identity, private-clip handling and networking helpers."""
 
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ def open_hub(tmp_path):
     hub._connections.clear()
     hub._history.clear()
     hub._auth.clear()
-    hub._auth_failures.clear()
     hub._hosts.clear()
     hub._devices.clear()
     hub._pinned.clear()
@@ -25,14 +24,13 @@ def open_hub(tmp_path):
     hub._connections.clear()
     hub._history.clear()
     hub._auth.clear()
-    hub._auth_failures.clear()
     hub._hosts.clear()
     hub._devices.clear()
     hub._pinned.clear()
     hub._trust = old_trust
 
 
-# -- plan §2.9: history survives restarts -----------------------------------------
+# -- history survives restarts -----------------------------------------
 
 
 @pytest.mark.asyncio
@@ -63,7 +61,7 @@ async def test_pin_remove_and_clear(open_hub, client):
     await hub.handle_message(None, {"device_id": "d", "type": "text", "content": "b"})
     clip_id = hub.get_history()[0]["id"]
     await hub.set_pinned(clip_id, True)
-    assert hub.is_pinned(clip_id)
+    assert clip_id in hub._pinned
 
     assert await hub.remove_item("missing") is False
     assert await hub.remove_item(hub.get_history()[-1]["id"]) is True
@@ -104,7 +102,7 @@ def test_janitor_sweep(tmp_path):
     assert not (shared / "stale.part").exists()
 
 
-# -- plan §2.10: device identity ----------------------------------------------------
+# -- device identity ----------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -146,7 +144,7 @@ def test_hello_ignored_when_unauthenticated(open_hub, tmp_path):
     asyncio.run(_check())
 
 
-# -- plan §2.6: privacy ---------------------------------------------------------------
+# -- privacy ---------------------------------------------------------------
 
 
 def test_private_clip_skipped_by_default():
@@ -204,7 +202,7 @@ def test_privacy_prefs_roundtrip(tmp_path):
     assert loaded.extra_blocked_apps == ["Vault.exe"]
 
 
-# -- plan §2.12: network ---------------------------------------------------------------
+# -- network ---------------------------------------------------------------
 
 
 def test_find_open_port_skips_busy():

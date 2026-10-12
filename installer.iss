@@ -1,4 +1,4 @@
-; ClipBoardSync installer (plan §5.1). Build the app first:
+; ClipBoardSync installer. Build the app first:
 ;   python build_exe.py --mode onedir --target gui
 ; then compile this script with Inno Setup 6.
 #define MyAppName "ClipBoardSync"
@@ -26,6 +26,7 @@ UninstallDisplayName={#MyAppName}
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
+Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Shortcuts:"; Flags: unchecked
 Name: "autostart"; Description: "Start sharing when Windows starts"; GroupDescription: "Startup:"; Flags: unchecked
 
 [Files]
@@ -37,7 +38,7 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; \
-  ValueName: "{#MyAppName}"; ValueData: """{app}\{#MyAppExeName}"""; Flags: uninsdeletevalue; Tasks: autostart
+  ValueName: "{#MyAppName}"; ValueData: """{app}\{#MyAppExeName}"" --minimized"; Flags: uninsdeletevalue; Tasks: autostart
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Start sharing now"; Flags: nowait postinstall skipifsilent

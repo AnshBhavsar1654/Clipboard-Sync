@@ -1,4 +1,4 @@
-"""pywebview desktop shell: window + JS bridge (plan §4.1/§4.6)."""
+"""pywebview desktop shell: window + JS bridge."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ class ShellApi:
         self._get_window = get_window
         self._get_last_hwnd = get_last_hwnd
 
-    # -- file pickers (native dialogs; DataTransfer paths are faked) ---------
+    # -- native pickers --------------------------------------------------------
     def pick_files(self) -> list[str]:
         return self._pick("files")
 
@@ -29,58 +29,80 @@ class ShellApi:
 
     def _pick(self, kind: str) -> list[str]:
         try:
-            import tkinter as tk
-            from tkinter import filedialog
+            import webview
 
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
-            try:
-                if kind == "folder":
-                    chosen = filedialog.askdirectory(title="Choose a folder to share")
-                    return [chosen] if chosen else []
-                chosen = filedialog.askopenfilenames(title="Choose files to share")
-                return list(chosen) if chosen else []
-            finally:
-                root.destroy()
+            win = self._get_window("main")
+            if win is None:
+                return []
+            if kind == "folder":
+                chosen = win.create_file_dialog(webview.FileDialog.FOLDER)
+            else:
+                chosen = win.create_file_dialog(webview.FileDialog.OPEN, allow_multiple=True)
+            return [str(p) for p in chosen] if chosen else []
         except Exception as exc:
             logger.warning("File picker failed: %s", exc)
             return []
 
     # -- downloads ------------------------------------------------------------
-    def reveal(self, file_url: str) -> bool:
-        """Download a shared file, then open it (desktop Save/Open action)."""
+    def _receive_dir(self) -> Path:
+        from client.config import Config, load_prefs
+
+        prefs = load_prefs(Config().config_dir)
+        if prefs.receive_folder:
+            dest_dir = Path(prefs.receive_folder).expanduser()
+        else:
+            dest_dir = Path.home() / "Downloads" / "ClipBoardSync"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        return dest_dir
+
+    def save_item(self, file_url: str, filename: str) -> dict[str, Any]:
+        """Download a shared file into the receive folder under its real name."""
         try:
             import httpx
 
-            from client.config import load_prefs
             from server.filenames import unique_path
+            from server.hub import is_allowed_file_url
 
-            app = self._engine._client_app
-            if app is None or not file_url:
-                return False
-            url = app._resolve_file_url(str(file_url))
-            if not url:
-                return False
-            prefs = load_prefs(app._config.config_dir)
-            if prefs.receive_folder:
-                dest_dir = Path(prefs.receive_folder).expanduser()
-            else:
-                dest_dir = Path.home() / "Downloads" / "ClipBoardSync"
-            dest_dir.mkdir(parents=True, exist_ok=True)
-            dest = unique_path(dest_dir, "shared_file")
+            if not file_url or not str(file_url).startswith("/") or not is_allowed_file_url(str(file_url)):
+                return {"ok": False, "error": "Not a shared file."}
+            dest = unique_path(self._receive_dir(), filename or "shared_file")
             with httpx.Client(timeout=300.0) as client:
-                with client.stream("GET", url) as resp:
+                with client.stream("GET", f"http://127.0.0.1:{self._engine.port}{file_url}") as resp:
                     if resp.status_code not in (200, 206):
-                        return False
+                        return {"ok": False, "error": "The file is no longer available."}
                     with dest.open("wb") as out:
                         for chunk in resp.iter_bytes(1024 * 1024):
                             out.write(chunk)
-            os.startfile(str(dest))  # noqa: S606 - local user-picked download
+            return {"ok": True, "path": str(dest)}
+        except Exception as exc:
+            logger.warning("Save failed: %s", exc)
+            return {"ok": False, "error": "Could not save the file."}
+
+    def open_path(self, path: str) -> bool:
+        try:
+            os.startfile(str(path))  # noqa: S606 - a file the user just saved
             return True
         except Exception as exc:
-            logger.warning("Reveal failed: %s", exc)
+            logger.warning("Open failed: %s", exc)
             return False
+
+    def show_in_folder(self, path: str) -> bool:
+        try:
+            import subprocess
+
+            subprocess.Popen(["explorer", f"/select,{path}"])  # noqa: S603,S607
+            return True
+        except Exception as exc:
+            logger.warning("Show in folder failed: %s", exc)
+            return False
+
+    def open_url(self, url: str) -> bool:
+        """Open a shared link in the default browser (http/https only)."""
+        import webbrowser
+
+        if not str(url).lower().startswith(("http://", "https://")):
+            return False
+        return webbrowser.open(str(url))
 
     # -- clipboard sharing ----------------------------------------------------
     def share_clipboard_now(self) -> bool:
@@ -163,7 +185,7 @@ def time_sleep(seconds: float) -> None:
 
 
 def run_window(port: int, engine, admin_token: str, holders: dict[str, Any] | None = None,
-               block: bool = True):
+               block: bool = True, hidden: bool = False):
     """Create the main desktop window. Returns (window, api).
 
     ``holders`` is caller-owned shared state (main/quick windows, last_hwnd).
@@ -180,10 +202,10 @@ def run_window(port: int, engine, admin_token: str, holders: dict[str, Any] | No
         return holders.get(which)
 
     api = ShellApi(engine, _get_window, lambda: holders.get("last_hwnd", 0))
-    url = f"http://127.0.0.1:{port}/desktop?t={admin_token}"
+    url = f"http://127.0.0.1:{port}/desktop/?t={admin_token}"
     win = webview.create_window(
-        "ClipBoardSync", url, width=980, height=680, min_size=(720, 520),
-        js_api=api, text_select=True,
+        "ClipBoardSync", url, width=1040, height=700, min_size=(760, 520),
+        js_api=api, text_select=True, hidden=hidden,
     )
     holders["main"] = win
     if block:
