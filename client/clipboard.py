@@ -1,23 +1,27 @@
-"""Windows clipboard monitoring and manipulation via native Win32 APIs."""
+"""Windows clipboard monitoring and manipulation via native Win32 APIs.
+
+Win32 access lives in :mod:`client.clipboard_backend` behind the
+``ClipboardBackend`` interface. This monitor keeps its public API but
+delegates reads/writes to the backend so tests can inject ``FakeClipboardBackend``.
+Win32 GUI imports are lazy so this module imports on Linux CI.
+"""
 
 from __future__ import annotations
 
 import asyncio
-import base64
-import ctypes
-import io
 import logging
-from pathlib import Path
 import threading
 import time
-from collections.abc import Awaitable, Callable
-from ctypes import wintypes
+from collections.abc import Awaitable, Callable, Collection
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageGrab
-import win32clipboard
-import win32con
-import win32gui
+from client.clipboard_backend import (
+    ClipboardBackend,
+    default_backend,
+    fingerprint_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,19 +30,34 @@ ClipboardChangeHandler = Callable[[str | dict[str, Any]], Awaitable[None] | None
 _WINDOW_CLASS = "ClipBoardSyncHiddenListener"
 WM_CLIPBOARDUPDATE = 0x031D
 
-_user32 = ctypes.windll.user32
-_user32.AddClipboardFormatListener.argtypes = [wintypes.HWND]
-_user32.AddClipboardFormatListener.restype = wintypes.BOOL
-_user32.RemoveClipboardFormatListener.argtypes = [wintypes.HWND]
-_user32.RemoveClipboardFormatListener.restype = wintypes.BOOL
+_DEBOUNCE_SECONDS = 0.06
+
+
+def _seq_is_newer(cur: int, old: int) -> bool:
+    """Wrap-safe 'cur is strictly newer than old' for 32-bit seq numbers."""
+    if cur == old:
+        return False
+    return 0 < ((cur - old) & 0xFFFFFFFF) < 0x80000000
 
 
 def _add_clipboard_format_listener(hwnd: int) -> bool:
-    return bool(_user32.AddClipboardFormatListener(hwnd))
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    user32.AddClipboardFormatListener.argtypes = [wintypes.HWND]
+    user32.AddClipboardFormatListener.restype = wintypes.BOOL
+    return bool(user32.AddClipboardFormatListener(hwnd))
 
 
 def _remove_clipboard_format_listener(hwnd: int) -> bool:
-    return bool(_user32.RemoveClipboardFormatListener(hwnd))
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    user32.RemoveClipboardFormatListener.argtypes = [wintypes.HWND]
+    user32.RemoveClipboardFormatListener.restype = wintypes.BOOL
+    return bool(user32.RemoveClipboardFormatListener(hwnd))
 
 
 class ClipboardMonitor:
@@ -54,15 +73,31 @@ class ClipboardMonitor:
         self,
         loop: asyncio.AbstractEventLoop,
         on_change: ClipboardChangeHandler,
+        backend: ClipboardBackend | None = None,
+        skip_private: bool = True,
+        blocked_apps: Collection[str] | None = None,
     ) -> None:
         self._loop = loop
         self._on_change = on_change
+        self._backend: ClipboardBackend = backend or default_backend()
+        self._skip_private = skip_private
+        if blocked_apps and hasattr(self._backend, "blocked_owner_exes"):
+            try:
+                self._backend.blocked_owner_exes.update(a.lower() for a in blocked_apps)  # type: ignore[union-attr]
+            except Exception:
+                pass
         self._thread: threading.Thread | None = None
         self._hwnd: int | None = None
         self._stop_event = threading.Event()
+        # Reads run here (max 1 at a time) so the Win32 pump never blocks
+        # and bursts of updates coalesce via the debounce below.
+        self._reader = ThreadPoolExecutor(max_workers=1, thread_name_prefix="clipboard-read")
+        self._reader_shutdown = False
+        self._last_notify = 0.0
 
-        self._last_content: str | None = None
+        self._last_fingerprint: str | None = None
         self._suppress_next_change = False
+        self._own_seq = 0
         self._state_lock = threading.Lock()
 
     def start(self) -> None:
@@ -83,158 +118,98 @@ class ClipboardMonitor:
         """Signal the listener thread to stop and wait for it to exit."""
         self._stop_event.set()
         if self._hwnd:
-            win32gui.PostMessage(self._hwnd, win32con.WM_CLOSE, 0, 0)
+            try:
+                import win32con
+                import win32gui
+
+                win32gui.PostMessage(self._hwnd, win32con.WM_CLOSE, 0, 0)
+            except ImportError:
+                pass
         if self._thread:
             self._thread.join(timeout=5.0)
             self._thread = None
+        if not self._reader_shutdown:
+            self._reader_shutdown = True
+            self._reader.shutdown(wait=True)
         logger.info("Clipboard monitor stopped")
+
+    def _note_own_write(self, payload: dict[str, Any] | None = None) -> None:
+        """Record a programmatic write for echo suppression.
+
+        The flag is set before the write (cheap, synchronous); the clipboard
+        sequence number is captured after, so the two notifications raised by
+        EmptyClipboard()+SetClipboardData() are both recognised as ours.
+        """
+        with self._state_lock:
+            self._suppress_next_change = True
+            if payload is not None:
+                self._last_fingerprint = fingerprint_payload(payload)
+        try:
+            seq = int(self._backend.sequence_number() or 0)
+        except Exception:
+            seq = 0
+        with self._state_lock:
+            self._own_seq = seq
+
+    def _is_own_update(self) -> bool:
+        """True if the pending clipboard update was written by us."""
+        try:
+            cur = int(self._backend.sequence_number() or 0)
+        except Exception:
+            cur = 0
+        with self._state_lock:
+            if self._own_seq and cur and not _seq_is_newer(cur, self._own_seq):
+                self._suppress_next_change = False
+                return True
+            if self._suppress_next_change:
+                self._suppress_next_change = False
+                return True
+            return False
 
     def set_text(self, text: str) -> None:
         """
         Write text to the local clipboard without triggering an outbound sync.
 
-        Sets a suppression flag so the resulting WM_CLIPBOARDUPDATE notification
-        is not treated as a user-initiated copy.
+        Echo suppression is by clipboard sequence number, with the
+        one-shot flag as a fallback when the backend has no sequence number.
         """
         with self._state_lock:
             self._suppress_next_change = True
-            self._last_content = text
 
-        win32clipboard.OpenClipboard()
-        try:
-            win32clipboard.EmptyClipboard()
-            win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, text)
-        finally:
-            win32clipboard.CloseClipboard()
+        self._backend.write_text(text)
+        self._note_own_write({"type": "text", "content": text})
 
         logger.debug("Local clipboard updated programmatically (%d chars)", len(text))
 
-    def set_image_from_base64(self, b64_data_uri: str) -> None:
-        """Write base64-encoded image data to Win32 clipboard in CF_DIB format."""
+    def set_image_from_bytes(self, raw_bytes: bytes) -> None:
+        """Write decoded image bytes to the clipboard."""
+        with self._state_lock:
+            self._suppress_next_change = True
+
+        self._backend.write_image_bytes(bytes(raw_bytes))
+        self._note_own_write({"type": "image", "content": ""})
+
+        logger.info("Set image (%d bytes) to clipboard programmatically", len(raw_bytes))
+
+    def set_files(self, paths: list[Path]) -> None:
+        """Put files on the clipboard as CF_HDROP."""
+        with self._state_lock:
+            self._suppress_next_change = True
+        self._backend.write_files(list(paths))
+        self._note_own_write()
+
+    def get_clipboard_payload(self) -> dict[str, Any] | None:
+        """Inspect the system clipboard for text, images, files, or folders."""
         try:
-            if "," in b64_data_uri:
-                b64_str = b64_data_uri.split(",", 1)[1]
-            else:
-                b64_str = b64_data_uri
-
-            raw_bytes = base64.b64decode(b64_str)
-            img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
-
-            buf = io.BytesIO()
-            img.save(buf, "BMP")
-            bmp_bytes = buf.getvalue()
-            dib_bytes = bmp_bytes[14:]  # Omit 14-byte BMP header to get DIB
-
-            with self._state_lock:
-                self._suppress_next_change = True
-                self._last_content = b64_data_uri[:100]
-
-            win32clipboard.OpenClipboard()
-            try:
-                win32clipboard.EmptyClipboard()
-                win32clipboard.SetClipboardData(win32con.CF_DIB, dib_bytes)
-            finally:
-                win32clipboard.CloseClipboard()
-
-            logger.info("Set image (%d bytes DIB) to Windows clipboard programmatically", len(dib_bytes))
+            return self._backend.read_payload(skip_private=self._skip_private)
         except Exception as exc:
-            logger.warning("Failed to write image to Windows clipboard: %s", exc)
-
-    @staticmethod
-    def get_clipboard_payload() -> dict[str, Any] | None:
-        """Inspect system clipboard for text, images, files, or folders."""
-        # 1. Try reading Image or File list from clipboard using PIL ImageGrab
-        try:
-            grabbed = ImageGrab.grabclipboard()
-            if isinstance(grabbed, Image.Image):
-                buf = io.BytesIO()
-                grabbed.save(buf, format="PNG")
-                png_bytes = buf.getvalue()
-                b64_str = base64.b64encode(png_bytes).decode("utf-8")
-                return {
-                    "type": "image",
-                    "content": f"data:image/png;base64,{b64_str}",
-                    "filename": f"screenshot_{int(time.time())}.png",
-                    "filesize": len(png_bytes),
-                }
-            elif isinstance(grabbed, list) and grabbed:
-                paths = [Path(p) for p in grabbed]
-                dirs = [p for p in paths if p.is_dir()]
-                files = [p for p in paths if p.is_file()]
-                if dirs:
-                    # Share the first copied folder as a zip (keeps structure)
-                    folder = dirs[0].resolve()
-                    return {
-                        "type": "folder",
-                        "content": f"Folder: {folder.name}",
-                        "filename": folder.name,
-                        "filepath": str(folder),
-                        "entry_count": len(files) + len(dirs),
-                    }
-                if len(files) > 1:
-                    # Multi-file copy: share the first file now; the GUI
-                    # Send flow can share the rest. Keeps the feed clean.
-                    first_file = files[0]
-                    return {
-                        "type": "file",
-                        "content": f"File: {first_file.name} (+{len(files) - 1} more)",
-                        "filename": first_file.name,
-                        "filesize": first_file.stat().st_size,
-                        "filepath": str(first_file.resolve()),
-                    }
-                first_file = files[0] if files else Path(grabbed[0])
-                if first_file.is_file():
-                    ext = first_file.suffix.lower()
-                    filesize = first_file.stat().st_size
-                    if ext in (".png", ".jpg", ".jpeg", ".gif", ".webp") and filesize < 10 * 1024 * 1024:
-                        raw = first_file.read_bytes()
-                        mime = f"image/{ext[1:]}" if ext != ".jpg" else "image/jpeg"
-                        b64_str = base64.b64encode(raw).decode("utf-8")
-                        return {
-                            "type": "image",
-                            "content": f"data:{mime};base64,{b64_str}",
-                            "filename": first_file.name,
-                            "filesize": filesize,
-                        }
-                    else:
-                        return {
-                            "type": "file",
-                            "content": f"File: {first_file.name}",
-                            "filename": first_file.name,
-                            "filesize": filesize,
-                            "filepath": str(first_file.resolve()),
-                        }
-        except Exception as exc:
-            logger.debug("ImageGrab inspect exception: %s", exc)
-
-        # 2. Fallback to Unicode text reading
-        text = ClipboardMonitor.get_text()
-        if text and text.strip():
-            return {
-                "type": "text",
-                "content": text,
-            }
-        return None
-
-    @staticmethod
-    def get_text() -> str | None:
-        """Read Unicode text from the clipboard, or None if unavailable."""
-        try:
-            win32clipboard.OpenClipboard()
-        except Exception:
-            logger.debug("Clipboard is locked by another process", exc_info=True)
+            logger.debug("Backend read_payload failed: %s", exc)
             return None
 
-        try:
-            if not win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
-                return None
-            data = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
-            return data if isinstance(data, str) else None
-        finally:
-            win32clipboard.CloseClipboard()
-
     @staticmethod
-    def _build_window_class() -> win32gui.WNDCLASS:
+    def _build_window_class():  # type: ignore[no-untyped-def]
+        import win32gui
+
         wc = win32gui.WNDCLASS()
         wc.lpfnWndProc = ClipboardMonitor._static_window_proc
         wc.lpszClassName = _WINDOW_CLASS
@@ -242,6 +217,11 @@ class ClipboardMonitor:
 
     def _run_message_loop(self) -> None:
         """Create a hidden window, register for updates, and pump messages."""
+        try:
+            import win32gui
+        except ImportError:
+            logger.warning("Clipboard monitor needs Windows (win32gui missing); idle.")
+            return
         # Instance is bound before the window is created so the static proc can
         # dispatch back to this monitor from the Win32 callback thread.
         ClipboardMonitor._active_instance = self
@@ -305,14 +285,19 @@ class ClipboardMonitor:
 
     @staticmethod
     def _static_window_proc(hwnd: int, msg: int, wparam: int, lparam: int) -> Any:
+        import win32gui
+
         instance = ClipboardMonitor._active_instance
         if instance is None:
             return win32gui.DefWindowProc(hwnd, msg, wparam, lparam)
         return instance._window_proc(hwnd, msg, wparam, lparam)
 
     def _window_proc(self, hwnd: int, msg: int, wparam: int, lparam: int) -> Any:
+        import win32con
+        import win32gui
+
         if msg == WM_CLIPBOARDUPDATE:
-            self._handle_clipboard_update()
+            self._notify_clipboard_changed()
         elif msg == win32con.WM_CLOSE:
             win32gui.DestroyWindow(hwnd)
             return 0
@@ -321,24 +306,48 @@ class ClipboardMonitor:
             return 0
         return win32gui.DefWindowProc(hwnd, msg, wparam, lparam)
 
+    def _notify_clipboard_changed(self) -> None:
+        """Called on the Win32 pump thread: hand the read to the worker so the
+        pump never blocks and bursts coalesce via debounce."""
+        self._last_notify = time.monotonic()
+        if self._stop_event.is_set() or self._reader_shutdown:
+            return
+        try:
+            self._reader.submit(self._read_and_dispatch)
+        except RuntimeError:
+            pass  # shutting down
+
     def _handle_clipboard_update(self) -> None:
-        with self._state_lock:
-            if self._suppress_next_change:
-                self._suppress_next_change = False
-                logger.debug("Ignored programmatic clipboard update")
-                return
+        """Synchronous read path (kept for tests / direct callers)."""
+        self._read_and_dispatch(skip_debounce=True)
+
+    def _read_and_dispatch(self, skip_debounce: bool = False) -> None:
+        if not skip_debounce:
+            while True:  # coalesce bursts: wait for 60 ms of quiet
+                wait = _DEBOUNCE_SECONDS - (time.monotonic() - self._last_notify)
+                if wait <= 0 or self._stop_event.is_set():
+                    break
+                time.sleep(wait)
+        if self._stop_event.is_set():
+            return
+
+        if self._is_own_update():
+            logger.debug("Ignored programmatic clipboard update")
+            return
 
         payload = self.get_clipboard_payload()
         if payload is None:
             logger.debug("Clipboard changed but contains unsupported content")
             return
 
-        content_key = str(payload.get("content", ""))[:100]
+        # Full-content hash dedupe: two different long clips that
+        # share a prefix must both sync.
+        fingerprint = fingerprint_payload(payload)
         with self._state_lock:
-            if content_key == self._last_content:
+            if fingerprint == self._last_fingerprint:
                 logger.debug("Ignored duplicate clipboard content")
                 return
-            self._last_content = content_key
+            self._last_fingerprint = fingerprint
 
         p_type = payload.get("type", "text")
         logger.info("Clipboard change detected (type=%s)", p_type)

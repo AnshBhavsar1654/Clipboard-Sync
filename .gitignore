@@ -1,20 +1,21 @@
 __pycache__/
 *.py[cod]
 *$py.class
-
-server/static/uploads/
+IMPLEMENTATION_PLAN.md
 
 .venv/
 venv/
 env/
 ENV/
 
+# Build outputs ship as GitHub Release assets, never in git (plan §5.1).
 build/
+dist/
+*.spec
+*.spec.bak
 wheels/
 *.egg-info/
 .eggs/
-
-*.spec.bak
 
 .pytest_cache/
 .coverage

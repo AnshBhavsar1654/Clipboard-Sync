@@ -6,10 +6,12 @@ import asyncio
 import logging
 import signal
 import sys
+import time
+from datetime import datetime
 from typing import Any
 
 from client.clipboard import ClipboardMonitor
-from client.config import Config, load_config
+from client.config import Config, load_config, load_prefs
 from client.websocket_client import WebSocketClient
 
 logger = logging.getLogger(__name__)
@@ -28,10 +30,16 @@ class ClipBoardSyncApp:
         self._config = config
         self._loop = asyncio.get_running_loop()
         self._shutdown_event = asyncio.Event()
+        self._prefs = load_prefs(config.config_dir)
+        # Only clips newer than this are applied from a history frame, so a
+        # restart never re-downloads or re-pastes what is already stored.
+        self._history_floor = time.time()
 
         self._clipboard = ClipboardMonitor(
             loop=self._loop,
             on_change=self._on_local_clipboard_change,
+            skip_private=not self._prefs.share_private_clips,
+            blocked_apps=self._prefs.extra_blocked_apps,
         )
         self._websocket = WebSocketClient(
             url=config.websocket_url,
@@ -68,8 +76,25 @@ class ClipBoardSyncApp:
             .replace("/ws", "")
         )
 
-    def _resolve_file_url(self, file_url: str) -> str:
+    def _resolve_file_url(self, file_url: str) -> str | None:
+        """Resolve a hub file_url to a download URL, or None to skip it.
+
+        Absolute URLs are only honored when they point at the sync server we
+        are connected to — a paired device must not redirect the
+        desktop into downloading from an arbitrary host.
+        """
+        from urllib.parse import urlparse
+
         if file_url.startswith("http://") or file_url.startswith("https://"):
+            try:
+                got = urlparse(file_url).hostname or ""
+                want = urlparse(self._http_base()).hostname or ""
+            except Exception:
+                return None
+            loopback = ("127.0.0.1", "::1", "localhost")
+            if got != want and not (got in loopback and want in loopback):
+                logger.warning("Ignoring file link pointing at unexpected host: %s", got)
+                return None
             return file_url
         return f"{self._http_base()}{file_url if file_url.startswith('/') else '/' + file_url}"
 
@@ -102,10 +127,11 @@ class ClipBoardSyncApp:
                         logger.warning("Upload failed for %s: %s", filename, resp.status_code)
                         return False
                     payload = resp.json()
+                    # Keep the URL relative (/api/files/<id>): each device
+                    # resolves it against its own server. Absolutizing here
+                    # would bake in this computer's loopback address, which
+                    # is unreachable (and origin-mismatched) everywhere else.
                     file_url = payload.get("url", "")
-                    # Store absolute URL so a second PC can download directly
-                    if file_url.startswith("/"):
-                        file_url = f"{self._http_base()}{file_url}"
                     label = "Folder" if item_type == "folder" else "File"
                     content_label = f"{label}: {payload.get('filename')}"
                     if entry_count is not None:
@@ -126,40 +152,88 @@ class ClipBoardSyncApp:
             logger.warning("Failed to upload local %s clip: %s", item_type, exc)
             return False
 
-    async def _download_shared_file(self, message: dict[str, Any]) -> None:
-        """Download a shared file/folder link to ~/Downloads/ClipBoardSync/."""
-        import httpx
+    def _receive_dir(self) -> Any:
         from pathlib import Path
+
+        if self._prefs.receive_folder:
+            return Path(self._prefs.receive_folder).expanduser()
+        return Path.home() / "Downloads" / "ClipBoardSync"
+
+    async def _upload_bytes(
+        self,
+        data: bytes,
+        filename: str,
+        item_type: str,
+    ) -> dict[str, Any] | None:
+        """POST in-memory bytes to /api/upload. Returns the server payload."""
+        import httpx
+
+        try:
+            async with httpx.AsyncClient(timeout=300.0) as client:
+                resp = await client.post(
+                    f"{self._http_base()}/api/upload",
+                    files={"file": (filename, data)},
+                    data={"item_type": item_type},
+                )
+                if resp.status_code != 200:
+                    logger.warning("Byte upload failed for %s: %s", filename, resp.status_code)
+                    return None
+                return resp.json()
+        except Exception as exc:
+            logger.warning("Failed to upload %s bytes: %s", item_type, exc)
+            return None
+
+    async def _share_image_bytes(self, data: bytes, filename: str) -> bool:
+        """Share clipboard image bytes as metadata: the socket
+        carries file_url + thumb only, never the pixels."""
+        payload = await self._upload_bytes(data, filename, "image")
+        if not payload:
+            return False
+        # Relative URL: resolvable by every device (see _upload_path).
+        file_url = payload.get("url", "")
+        await self._websocket.send_clipboard_update(
+            content=f"Image: {payload.get('filename', filename)}",
+            content_type="image",
+            filename=payload.get("filename", filename),
+            filesize=payload.get("filesize", len(data)),
+            file_url=file_url,
+            thumb=payload.get("thumb"),
+        )
+        logger.info("Uploaded and shared image: %s", payload.get("filename"))
+        print(f"Shared photo '{payload.get('filename')}'.")
+        return True
+
+    async def _download_shared_file(self, message: dict[str, Any]) -> Any:
+        """Download a shared file/folder link; returns the saved path or None."""
+        import httpx
+
+        from server.filenames import unique_path
         file_url = str(message.get("file_url") or "")
         if not file_url:
-            return
+            return None
         url = self._resolve_file_url(file_url)
+        if not url:
+            return None
         filename = str(message.get("filename") or "shared_file")
-        safe = "".join(c if c.isalnum() or c in "._- " else "_" for c in filename).strip() or "shared_file"
-        dest_dir = Path.home() / "Downloads" / "ClipBoardSync"
+        dest_dir = self._receive_dir()
         try:
             dest_dir.mkdir(parents=True, exist_ok=True)
-            dest = dest_dir / safe
-            # Avoid overwriting: add (1), (2), ...
-            if dest.exists():
-                stem, suffix = dest.stem, dest.suffix
-                i = 1
-                while (dest_dir / f"{stem} ({i}){suffix}").exists():
-                    i += 1
-                dest = dest_dir / f"{stem} ({i}){suffix}"
+            dest = unique_path(dest_dir, filename)
             async with httpx.AsyncClient(timeout=300.0) as client:
                 async with client.stream("GET", url) as resp:
                     if resp.status_code not in (200, 206):
-                        logger.warning("Download failed (%s) for %s", resp.status_code, safe)
-                        return
+                        logger.warning("Download failed (%s) for %s", resp.status_code, dest.name)
+                        return None
                     with dest.open("wb") as out:
                         async for chunk in resp.aiter_bytes(1024 * 1024):
                             out.write(chunk)
             kind = "Folder (.zip)" if message.get("type") == "folder" else "File"
             print(f"{kind} saved: {dest}")
             logger.info("Downloaded shared %s to %s", message.get("type"), dest)
+            return dest
         except Exception as exc:
             logger.warning("Failed to download shared file %s: %s", filename, exc)
+            return None
 
     async def _on_local_clipboard_change(self, payload: str | dict[str, Any]) -> None:
         """Handle a user-initiated clipboard copy detected locally."""
@@ -177,18 +251,22 @@ class ClipBoardSyncApp:
         filepath = payload.get("filepath")
 
         if p_type == "folder" and filepath:
-            # Zip the folder, then stream-upload the zip
+            # Zip the folder off the event loop (zipping blocks sharing while
+            # it runs), then stream-upload the zip
             try:
-                from server.folder_zip import zip_directory
                 from pathlib import Path
-                zip_path, zip_name, entries, skipped = zip_directory(filepath)
+
+                from server.folder_zip import zip_directory
+                zip_path, zip_name, entries, skipped = await asyncio.to_thread(
+                    zip_directory, filepath
+                )
                 try:
                     size = zip_path.stat().st_size
                     if size > 1024 * 1024 * 1024:
                         logger.warning("Folder '%s' too big to share (%d bytes).", zip_name, size)
                         print(f"Folder '{Path(filepath).name}' is too big to share (over 1 GB zipped).")
                         return
-                    ok = await self._upload_path(
+                    await self._upload_path(
                         str(zip_path), zip_name, "folder",
                         entry_count=entries, skipped_count=skipped,
                     )
@@ -212,6 +290,15 @@ class ClipBoardSyncApp:
             except Exception as exc:
                 logger.warning("Failed to upload local file clip: %s", exc)
 
+        if p_type == "image" and payload.get("image_bytes"):
+            # Screenshots share metadata only; bytes go via /api/upload.
+            import time as _time
+            name = filename or f"screenshot_{_time.strftime('%Y%m%d_%H%M%S')}.png"
+            if await self._share_image_bytes(bytes(payload["image_bytes"]), name):
+                return
+            logger.warning("Could not upload the clipboard image; not shared.")
+            return
+
         await self._websocket.send_clipboard_update(
             content=content,
             content_type=p_type,
@@ -221,6 +308,63 @@ class ClipBoardSyncApp:
             entry_count=payload.get("entry_count"),
             skipped_count=payload.get("skipped_count"),
         )
+
+    async def _apply_remote_item(self, message: dict[str, Any]) -> None:
+        """Land one incoming clip on this computer: images onto
+        the clipboard as pixels, files/folders onto the clipboard as CF_HDROP
+        so Explorer Ctrl+V pastes them — the Ctrl+V promise."""
+        source_device = message.get("device_id")
+        content_type = message.get("type", "text")
+        content = message.get("content")
+
+        if message.get("file_url"):
+            try:
+                declared = int(message.get("filesize") or 0)
+            except (TypeError, ValueError):
+                declared = 0
+            if declared and declared > self._prefs.auto_receive_max_bytes:
+                logger.info("Skipping auto-download of %s (%d bytes over cap).",
+                            message.get("filename"), declared)
+                print(f"'{message.get('filename')}' is too big to receive automatically "
+                      f"(over {self._prefs.auto_receive_max_bytes // (1024 * 1024)} MB).")
+                return
+
+        if content_type == "image" and message.get("file_url"):
+            logger.info("Applying shared photo from device %s", source_device)
+            dest = await self._download_shared_file(message)
+            if dest is None:
+                return
+            if self._prefs.put_received_on_clipboard:
+                try:
+                    if dest.stat().st_size <= self._prefs.auto_receive_max_bytes:
+                        self._clipboard.set_image_from_bytes(dest.read_bytes())
+                        print("New photo shared — copied to your clipboard.")
+                        return
+                except Exception as exc:
+                    logger.warning("Could not put photo on clipboard: %s", exc)
+            print(f"New photo shared — saved: {dest}")
+            return
+
+        if content_type in ("file", "folder") and message.get("file_url"):
+            logger.info("Applying shared %s from device %s", content_type, source_device)
+            dest = await self._download_shared_file(message)
+            if dest is None:
+                return
+            if self._prefs.put_received_on_clipboard:
+                try:
+                    self._clipboard.set_files([dest])
+                    print(f"New {content_type} shared — Ctrl+V to paste it.")
+                    return
+                except Exception as exc:
+                    logger.warning("Could not put file on clipboard: %s", exc)
+            print(f"New {content_type} shared — saved: {dest}")
+            return
+
+        if content_type == "text" and isinstance(content, str):
+            logger.info("Applying remote clipboard text update from device %s", source_device)
+            print("New text shared — copied to your clipboard.")
+            self._clipboard.set_text(content)
+            return
 
     async def _on_remote_clipboard_update(self, message: dict[str, Any]) -> None:
         """Apply a clipboard update or history received from another device."""
@@ -239,44 +383,22 @@ class ClipBoardSyncApp:
             latest = items[-1]
             if not isinstance(latest, dict):
                 return
-            latest_device = latest.get("device_id")
-            if latest_device == self._config.device_id:
+            floor, self._history_floor = self._history_floor, time.time()
+            if latest.get("device_id") == self._config.device_id:
                 logger.debug("Latest history item originated from self; skipping")
                 return
-
-            c_type = latest.get("type", "text")
-            content = latest.get("content")
-            if c_type == "text" and isinstance(content, str):
-                logger.info("Synchronizing latest clipboard text history item from device %s", latest_device)
-                self._clipboard.set_text(content)
-            elif c_type == "image" and isinstance(content, str) and content.startswith("data:image/"):
-                logger.info("Synchronizing latest clipboard image history item from device %s", latest_device)
-                self._clipboard.set_image_from_base64(content)
+            try:
+                sent_at = datetime.fromisoformat(str(latest.get("timestamp"))).timestamp()
+            except ValueError:
+                return
+            if sent_at <= floor:
+                logger.debug("Latest history item predates this session; skipping")
+                return
+            await self._apply_remote_item(latest)
             return
 
-        content = message.get("content")
-        if content_type == "image" and isinstance(content, str) and content.startswith("data:image/"):
-            logger.info("Applying remote clipboard image update from device %s", source_device)
-            print(f"New photo shared — copied to your clipboard.")
-            self._clipboard.set_image_from_base64(content)
-            return
-
-        if content_type == "image" and message.get("file_url"):
-            # Large photo shared as a download link (fast HTTP path)
-            logger.info("Downloading shared photo from device %s", source_device)
-            await self._download_shared_file(message)
-            return
-
-        if content_type in ("file", "folder") and message.get("file_url"):
-            logger.info("Downloading shared %s from device %s", content_type, source_device)
-            await self._download_shared_file(message)
-            return
-
-        if content_type == "text" and isinstance(content, str):
-            logger.info("Applying remote clipboard text update from device %s", source_device)
-            print(f"New text shared — copied to your clipboard.")
-            self._clipboard.set_text(content)
-            return
+        self._history_floor = time.time()
+        await self._apply_remote_item(message)
 
 
 def _install_signal_handlers(app: ClipBoardSyncApp) -> None:

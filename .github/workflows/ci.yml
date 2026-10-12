@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install ruff
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Test (pytest)
+        run: pytest -q --ignore=tests/smoke_exe.py --ignore=tests/test_phone_web.py
+
+  smoke:
+    # A missing hidden import must fail here, not in a release.
+    # Builds the headless exe (~5 min) and drives it over real HTTP+WS.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build headless exe
+        run: python build_exe.py --target headless
+
+      - name: Smoke the built exe
+        run: pytest tests/smoke_exe.py -q --exe=dist/ClipBoardSyncHeadless/ClipBoardSyncHeadless.exe

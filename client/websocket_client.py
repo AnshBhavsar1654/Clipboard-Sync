@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import websockets
@@ -48,10 +48,50 @@ class WebSocketClient:
 
         self._connection_task: asyncio.Task[None] | None = None
         self._sender_task: asyncio.Task[None] | None = None
+        self._heartbeat_task: asyncio.Task[None] | None = None
 
     @property
     def is_connected(self) -> bool:
         return self._connected.is_set()
+
+    def _connect_kwargs(self) -> dict[str, Any]:
+        # max_size=None: screenshots/history frames exceed the websockets
+        # 1 MiB default, which dropped the client with code 1009 in a
+        # reconnect loop. Bytes travel through /api/files anyway.
+        return {"max_size": None, "ping_interval": 20, "ping_timeout": 20}
+
+    async def _heartbeat_loop(self) -> None:
+        """App-level ping every 25 s so the server's silent-socket sweep
+        never mistakes this computer for a dead phone."""
+        while self._running:
+            try:
+                await asyncio.sleep(25)
+            except asyncio.CancelledError:
+                raise
+            if not self._running or not self._connection or not self.is_connected:
+                continue
+            try:
+                await self._connection.send(json.dumps({"type": "ping"}))
+            except Exception:
+                pass
+
+    async def _send_hello(self, ws: ClientConnection) -> None:
+        """Identify this computer for the hub device list."""
+        try:
+            import socket as _socket
+
+            try:
+                name = _socket.gethostname()
+            except Exception:
+                name = ""
+            await ws.send(json.dumps({
+                "type": "hello",
+                "device_id": self._device_id,
+                "name": name,
+                "kind": "computer",
+            }))
+        except Exception as exc:
+            logger.debug("Hello send failed: %s", exc)
 
     async def start(self) -> None:
         """Start connection management and outbound message processing."""
@@ -67,6 +107,10 @@ class WebSocketClient:
             self._sender_loop(),
             name="websocket-sender",
         )
+        self._heartbeat_task = asyncio.create_task(
+            self._heartbeat_loop(),
+            name="websocket-heartbeat",
+        )
         logger.info("WebSocket client started (url=%s)", self._url)
 
     async def stop(self) -> None:
@@ -78,7 +122,7 @@ class WebSocketClient:
             await self._connection.close()
             self._connection = None
 
-        for task in (self._connection_task, self._sender_task):
+        for task in (self._connection_task, self._sender_task, self._heartbeat_task):
             if task:
                 task.cancel()
                 try:
@@ -88,6 +132,7 @@ class WebSocketClient:
 
         self._connection_task = None
         self._sender_task = None
+        self._heartbeat_task = None
         logger.info("WebSocket client stopped")
 
     async def send_clipboard_update(
@@ -99,11 +144,12 @@ class WebSocketClient:
         file_url: str | None = None,
         entry_count: int | None = None,
         skipped_count: int | None = None,
+        thumb: str | None = None,
     ) -> None:
         """Queue a clipboard update for transmission to the backend."""
         message: dict[str, Any] = {
             "device_id": self._device_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "type": content_type,
             "content": content,
         }
@@ -113,6 +159,8 @@ class WebSocketClient:
             message["filesize"] = filesize
         if file_url:
             message["file_url"] = file_url
+        if thumb:
+            message["thumb"] = thumb
         if entry_count is not None:
             message["entry_count"] = entry_count
         if skipped_count is not None:
@@ -128,11 +176,12 @@ class WebSocketClient:
         while self._running:
             try:
                 logger.info("Connecting to %s ...", self._url)
-                async with websockets.connect(self._url) as ws:
+                async with websockets.connect(self._url, **self._connect_kwargs()) as ws:
                     self._connection = ws
                     self._connected.set()
                     attempt = 0
                     logger.info("Connected to backend")
+                    await self._send_hello(ws)
 
                     await self._receive_loop(ws)
             except asyncio.CancelledError:

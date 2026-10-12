@@ -1,51 +1,32 @@
-"""All-in-one integrated launcher for ClipBoardSync server and Windows desktop client."""
+"""Headless launcher: sharing server + clipboard client in a terminal, no window."""
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import socket
 import sys
-from typing import Any
 
 import qrcode
-import uvicorn
-from client.config import Config
-from client.main import ClipBoardSyncApp, _install_signal_handlers
+
 from server.auth import get_store
-from server.main import app as fastapi_app
+from server.net import primary_lan_ip
 
 logger = logging.getLogger("clipboardsync_runner")
 
 
-def get_local_lan_ip() -> str:
-    """Determine the primary IPv4 local network LAN routing address."""
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            # Does not transmit data over the Internet; discovers active networking interface IP
-            s.connect(("8.8.8.8", 80))
-            return str(s.getsockname()[0])
-    except Exception:
-        try:
-            hostname = socket.gethostname()
-            return str(socket.gethostbyname(hostname))
-        except Exception:
-            return "127.0.0.1"
-
-
 def print_pairing_instructions(port: int) -> None:
     """Render connection details and steps for sharing with a phone."""
-    ip = get_local_lan_ip()
+    ip = primary_lan_ip()
     mobile_url = f"http://{ip}:{port}"
     store = get_store()
     pin = store.pairing_pin if store.require_pin else "disabled"
+    qr_url = f"{mobile_url}/?pair={pin}" if store.require_pin else mobile_url
 
     print("")
     print("ClipBoardSync is running")
     print("-" * 62)
     print(f"Address:      {mobile_url}")
     if store.require_pin:
-        print(f"Pairing code: {pin} (enter once on your phone)")
+        print(f"Pairing code: {pin} (single-use: scan the code below, or type it once)")
     print("")
     print("How to connect:")
     print("1. Join the same Wi-Fi on your computer and phone.")
@@ -59,7 +40,7 @@ def print_pairing_instructions(port: int) -> None:
             box_size=1,
             border=2,
         )
-        qr.add_data(mobile_url)
+        qr.add_data(qr_url)
         qr.make(fit=True)
         # Print ASCII representation suitable for standard console screens
         qr.print_ascii(invert=True)
@@ -73,58 +54,46 @@ def print_pairing_instructions(port: int) -> None:
     print("")
 
 
-async def async_run_all(port: int = 8000) -> None:
-    """Concurrently operate the FastAPI WebSocket engine and native Win32 client."""
+def run_until_interrupted(port: int) -> None:
+    """Share on ``port`` until Ctrl+C, using the same engine as the desktop app."""
+    import queue
+    import time
+
+    from gui.engine import BackgroundEngine
+    from server.net import find_open_port
+
+    port = find_open_port(port)
     print_pairing_instructions(port)
-
-    # Configure and start Uvicorn sync backend
-    uv_config = uvicorn.Config(
-        app=fastapi_app,
-        host="0.0.0.0",
-        port=port,
-        log_level="warning",
-        access_log=False,
-        log_config=None,
-    )
-    server = uvicorn.Server(uv_config)
-    server_task = asyncio.create_task(server.serve(), name="uvicorn-backend")
-
-    # Allow brief moment for TCP port socket binding
-    await asyncio.sleep(0.4)
-
-    # Initialize native Win32 clipboard monitoring loop
-    client_config = Config()
-    client_config.websocket_url = f"ws://127.0.0.1:{port}/ws"
-    
-    client_app = ClipBoardSyncApp(client_config)
-    _install_signal_handlers(client_app)
-
-    # Watch for server failure or client shutdown request
-    client_task = asyncio.create_task(client_app.run(), name="win32-client")
-    
+    engine = BackgroundEngine(port=port)
+    engine.start(queue.Queue())
     try:
-        done, pending = await asyncio.wait(
-            [server_task, client_task],
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        for task in pending:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-    except asyncio.CancelledError:
-        server.should_exit = True
-        client_app.request_shutdown()
+        while engine.is_running:
+            time.sleep(0.5)
+    finally:
+        engine.stop()
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     """CLI launcher entrypoint."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run ClipBoardSync (server + desktop client).")
+    parser.add_argument("--port", type=int, default=8000, help="port to share on (default: 8000)")
+    parser.add_argument("--headless", action="store_true",
+                        help="run without any window (used by the built exe smoke test)")
+    args = parser.parse_args(argv)
+
     if sys.platform != "win32":
         print("ClipBoardSync works best on Windows for clipboard sharing.", file=sys.stderr)
-    
+
+    from server.net import ensure_single_instance
+
+    if not ensure_single_instance():
+        print("ClipBoardSync is already running. Use the open window.", file=sys.stderr)
+        sys.exit(0)
+
     try:
-        asyncio.run(async_run_all())
+        run_until_interrupted(args.port)
     except KeyboardInterrupt:
         print("\nStopping sharing. Goodbye!")
 
